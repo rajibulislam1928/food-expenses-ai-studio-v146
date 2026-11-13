@@ -1,0 +1,175 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account and active mess group pointer.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID matching document ID." },
+        "displayName": { "type": "string", "description": "User display name." },
+        "email": { "type": "string", "description": "User email address (private to owner)." },
+        "activeGroupId": { "type": "string", "description": "Currently selected MessGroup ID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "displayName", "email", "createdAt", "updatedAt"]
+    },
+    "MessInvite": {
+      "title": "MessInvite",
+      "description": "Lookup document keyed by 6-character uppercase invite code for joining a MessGroup.",
+      "type": "object",
+      "properties": {
+        "inviteCode": { "type": "string", "description": "6-character uppercase alphanumeric invite code." },
+        "groupId": { "type": "string", "description": "Target MessGroup document ID." },
+        "groupName": { "type": "string", "description": "Display name of the MessGroup." },
+        "ownerUid": { "type": "string", "description": "UID of the group owner." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["inviteCode", "groupId", "groupName", "ownerUid", "createdAt"]
+    },
+    "MessGroup": {
+      "title": "MessGroup",
+      "description": "Shared hostel or roommate mess group configuration and membership.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Mess group name." },
+        "ownerUid": { "type": "string", "description": "UID of the mess manager/creator." },
+        "memberUids": { "type": "array", "description": "Bounded list of authorized member Firebase UIDs." },
+        "inviteCode": { "type": "string", "description": "6-character invite code." },
+        "currencySymbol": { "type": "string", "description": "Currency symbol such as ৳, ₹, or $." },
+        "cycleMode": { "type": "string", "enum": ["MONTHLY", "WEEKLY"], "description": "Billing cycle cadence." },
+        "activeCycleId": { "type": "string", "description": "Currently active MessCycle document ID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["name", "ownerUid", "memberUids", "inviteCode", "currencySymbol", "cycleMode", "createdAt", "updatedAt"]
+    },
+    "MessCycle": {
+      "title": "MessCycle",
+      "description": "Weekly or monthly billing cycle belonging to a MessGroup.",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string", "description": "Parent MessGroup ID." },
+        "memberUids": { "type": "array", "description": "Denormalized authorized UIDs for local query/rule evaluation." },
+        "label": { "type": "string", "description": "Cycle display label." },
+        "cycleType": { "type": "string", "enum": ["MONTHLY", "WEEKLY"], "description": "Cycle type." },
+        "startDateEpochDay": { "type": "integer", "description": "Start date in LocalDate epoch days." },
+        "endDateEpochDay": { "type": "integer", "description": "End date in LocalDate epoch days." },
+        "status": { "type": "string", "enum": ["ACTIVE", "CLOSED"], "description": "Lifecycle status of the cycle." },
+        "createdByUid": { "type": "string", "description": "UID of creator." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["groupId", "memberUids", "label", "cycleType", "startDateEpochDay", "endDateEpochDay", "status", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "MessMember": {
+      "title": "MessMember",
+      "description": "A roommate/member tracked inside a MessGroup (linked or managed offline).",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string", "description": "Parent MessGroup ID." },
+        "memberUids": { "type": "array", "description": "Denormalized authorized UIDs." },
+        "name": { "type": "string", "description": "Member display name." },
+        "linkedUid": { "type": "string", "description": "Optional Firebase UID if member joined with Google." },
+        "role": { "type": "string", "enum": ["MANAGER", "MEMBER"], "description": "Role within mess." },
+        "isActive": { "type": "boolean", "description": "Whether member participates in active fixed-cost splits." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["groupId", "memberUids", "name", "role", "isActive", "createdAt", "updatedAt"]
+    },
+    "MealEntry": {
+      "title": "MealEntry",
+      "description": "Daily meal count record for one member on one date inside a cycle.",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string", "description": "Parent MessGroup ID." },
+        "cycleId": { "type": "string", "description": "Parent MessCycle ID." },
+        "memberUids": { "type": "array", "description": "Denormalized authorized UIDs." },
+        "memberId": { "type": "string", "description": "MessMember document ID." },
+        "dateEpochDay": { "type": "integer", "description": "LocalDate epoch day." },
+        "lunch": { "type": "number", "description": "Lunch meal units." },
+        "dinner": { "type": "number", "description": "Dinner meal units." },
+        "guestMeals": { "type": "number", "description": "Guest meal units." },
+        "updatedByUid": { "type": "string", "description": "UID of user who last updated this meal entry." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["groupId", "cycleId", "memberUids", "memberId", "dateEpochDay", "lunch", "dinner", "guestMeals", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "MessTransaction": {
+      "title": "MessTransaction",
+      "description": "Bazaar expense, shared fixed utility bill, member deposit, or settlement entry.",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string", "description": "Parent MessGroup ID." },
+        "cycleId": { "type": "string", "description": "Parent MessCycle ID." },
+        "memberUids": { "type": "array", "description": "Denormalized authorized UIDs." },
+        "type": { "type": "string", "enum": ["BAZAAR", "FIXED_UTILITY", "DEPOSIT", "SETTLEMENT"], "description": "Transaction category." },
+        "title": { "type": "string", "description": "Short item or bill description." },
+        "notes": { "type": "string", "description": "Optional itemized details." },
+        "amount": { "type": "number", "description": "Positive monetary amount." },
+        "paidByMemberId": { "type": "string", "description": "MessMember ID who paid or deposited." },
+        "dateEpochDay": { "type": "integer", "description": "Transaction date in epoch days." },
+        "createdByUid": { "type": "string", "description": "UID of author." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["groupId", "cycleId", "memberUids", "type", "title", "amount", "paidByMemberId", "dateEpochDay", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "MessActivityLog": {
+      "title": "MessActivityLog",
+      "description": "Immutable audit record attributing meal or expense changes to the roommate who made them.",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string", "description": "Parent MessGroup ID." },
+        "cycleId": { "type": "string", "description": "Parent MessCycle ID." },
+        "memberUids": { "type": "array", "description": "Denormalized authorized UIDs." },
+        "category": { "type": "string", "enum": ["MEAL", "EXPENSE"], "description": "Domain changed." },
+        "action": { "type": "string", "enum": ["ADDED", "UPDATED", "REMOVED"], "description": "Change action." },
+        "actorUid": { "type": "string", "description": "Firebase Auth UID of the user who performed the change." },
+        "actorName": { "type": "string", "description": "Display name of the user who performed the change." },
+        "targetMemberName": { "type": "string", "description": "Optional affected member or payer name." },
+        "title": { "type": "string", "description": "Headline describing what changed." },
+        "changeDetail": { "type": "string", "description": "Detailed summary showing previous and new values." },
+        "dateEpochDay": { "type": "integer", "description": "Affected date in epoch days." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["groupId", "cycleId", "memberUids", "category", "action", "actorUid", "actorName", "title", "changeDetail", "dateEpochDay", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and active group pointer."
+    },
+    "/messInvites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/MessInvite" },
+      "description": "Invite code lookup table for joining a mess group."
+    },
+    "/messGroups/{groupId}": {
+      "schema": { "$ref": "#/entities/MessGroup" },
+      "description": "Top-level shared mess groups."
+    },
+    "/messGroups/{groupId}/cycles/{cycleId}": {
+      "schema": { "$ref": "#/entities/MessCycle" },
+      "description": "Weekly or monthly cycles under a mess group."
+    },
+    "/messGroups/{groupId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/MessMember" },
+      "description": "Members tracked within a mess group."
+    },
+    "/messGroups/{groupId}/mealEntries/{entryId}": {
+      "schema": { "$ref": "#/entities/MealEntry" },
+      "description": "Daily meal entries per member and cycle."
+    },
+    "/messGroups/{groupId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/MessTransaction" },
+      "description": "Bazaar expenses, fixed utility bills, deposits, and settlements."
+    },
+    "/messGroups/{groupId}/activityLogs/{activityId}": {
+      "schema": { "$ref": "#/entities/MessActivityLog" },
+      "description": "Audit log of meal and expense additions, edits, and removals with author attribution."
+    }
+  }
+}

@@ -1,0 +1,417 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isGroupMember(groupId) {
+      return request.auth.uid in get(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidInviteCode(code) {
+      return code is string && code.size() == 6 && code.matches('^[A-Z0-9]{6}$');
+    }
+
+    function isValidMemberUidsList(uids) {
+      return uids is list &&
+             uids.size() >= 1 &&
+             uids.size() <= 50 &&
+             uids[0] is string &&
+             uids[0].size() >= 1 &&
+             uids[0].size() <= 128;
+    }
+
+    function isValidTimestamps(data) {
+      return data.createdAt is timestamp &&
+             data.createdAt <= request.time &&
+             data.updatedAt is timestamp &&
+             data.updatedAt <= request.time;
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['userId', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['userId', 'displayName', 'email', 'activeGroupId', 'createdAt', 'updatedAt']) &&
+             data.userId == userId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.email is string && data.email.size() <= 120 &&
+             (!('activeGroupId' in data) || data.activeGroupId == null || (data.activeGroupId is string && data.activeGroupId.size() <= 128)) &&
+             isValidTimestamps(data);
+    }
+
+    function isValidMessInvite(data, code) {
+      return data.keys().hasAll(['inviteCode', 'groupId', 'groupName', 'ownerUid', 'createdAt']) &&
+             data.keys().hasOnly(['inviteCode', 'groupId', 'groupName', 'ownerUid', 'createdAt']) &&
+             data.inviteCode == code &&
+             isValidId(data.groupId) &&
+             data.groupName is string && data.groupName.size() >= 1 && data.groupName.size() <= 80 &&
+             isValidId(data.ownerUid) &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidMessGroup(data) {
+      return data.keys().hasAll(['name', 'ownerUid', 'memberUids', 'inviteCode', 'currencySymbol', 'cycleMode', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['name', 'ownerUid', 'memberUids', 'inviteCode', 'currencySymbol', 'cycleMode', 'breakfastWeight', 'activeCycleId', 'createdAt', 'updatedAt']) &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             isValidId(data.ownerUid) &&
+             isValidMemberUidsList(data.memberUids) &&
+             isValidInviteCode(data.inviteCode) &&
+             data.currencySymbol is string && data.currencySymbol.size() >= 1 && data.currencySymbol.size() <= 6 &&
+             data.cycleMode in ['MONTHLY', 'WEEKLY'] &&
+             (!('breakfastWeight' in data) || (data.breakfastWeight is number && data.breakfastWeight > 0 && data.breakfastWeight <= 2.0)) &&
+             (!('activeCycleId' in data) || data.activeCycleId == null || (data.activeCycleId is string && data.activeCycleId.size() <= 128)) &&
+             isValidTimestamps(data);
+    }
+
+    function isValidMessCycle(data, groupId) {
+      return data.keys().hasAll(['groupId', 'memberUids', 'label', 'cycleType', 'startDateEpochDay', 'endDateEpochDay', 'status', 'createdByUid', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['groupId', 'memberUids', 'label', 'cycleType', 'startDateEpochDay', 'endDateEpochDay', 'status', 'createdByUid', 'createdAt', 'updatedAt']) &&
+             data.groupId == groupId &&
+             isValidMemberUidsList(data.memberUids) &&
+             data.label is string && data.label.size() >= 1 && data.label.size() <= 60 &&
+             data.cycleType in ['MONTHLY', 'WEEKLY'] &&
+             data.startDateEpochDay is int &&
+             data.endDateEpochDay is int &&
+             data.endDateEpochDay >= data.startDateEpochDay &&
+             data.status in ['ACTIVE', 'CLOSED'] &&
+             isValidId(data.createdByUid) &&
+             isValidTimestamps(data);
+    }
+
+    function isValidMessMember(data, groupId) {
+      return data.keys().hasAll(['groupId', 'memberUids', 'name', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['groupId', 'memberUids', 'name', 'linkedUid', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+             data.groupId == groupId &&
+             isValidMemberUidsList(data.memberUids) &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+             (!('linkedUid' in data) || data.linkedUid == null || (data.linkedUid is string && data.linkedUid.size() <= 128)) &&
+             data.role in ['MANAGER', 'MEMBER'] &&
+             data.isActive is bool &&
+             isValidTimestamps(data);
+    }
+
+    function isValidMealEntry(data, groupId) {
+      return data.keys().hasAll(['groupId', 'cycleId', 'memberUids', 'memberId', 'dateEpochDay', 'lunch', 'dinner', 'guestMeals', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['groupId', 'cycleId', 'memberUids', 'memberId', 'dateEpochDay', 'breakfast', 'lunch', 'dinner', 'guestMeals', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+             data.groupId == groupId &&
+             isValidId(data.cycleId) &&
+             isValidMemberUidsList(data.memberUids) &&
+             isValidId(data.memberId) &&
+             data.dateEpochDay is int &&
+             (!('breakfast' in data) || (data.breakfast is number && data.breakfast >= 0 && data.breakfast <= 20)) &&
+             data.lunch is number && data.lunch >= 0 && data.lunch <= 20 &&
+             data.dinner is number && data.dinner >= 0 && data.dinner <= 20 &&
+             data.guestMeals is number && data.guestMeals >= 0 && data.guestMeals <= 50 &&
+             isValidId(data.updatedByUid) &&
+             isValidTimestamps(data);
+    }
+
+    function isValidMessTransaction(data, groupId) {
+      return data.keys().hasAll(['groupId', 'cycleId', 'memberUids', 'type', 'title', 'amount', 'paidByMemberId', 'dateEpochDay', 'createdByUid', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['groupId', 'cycleId', 'memberUids', 'type', 'title', 'notes', 'amount', 'paidByMemberId', 'dateEpochDay', 'createdByUid', 'createdAt', 'updatedAt']) &&
+             data.groupId == groupId &&
+             isValidId(data.cycleId) &&
+             isValidMemberUidsList(data.memberUids) &&
+             data.type in ['BAZAAR', 'FIXED_UTILITY', 'DEPOSIT', 'SETTLEMENT'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 300)) &&
+             data.amount is number && data.amount > 0 && data.amount <= 10000000 &&
+             isValidId(data.paidByMemberId) &&
+             data.dateEpochDay is int &&
+             isValidId(data.createdByUid) &&
+             isValidTimestamps(data);
+    }
+
+    function isValidMessActivityLog(data, groupId) {
+      return data.keys().hasAll(['groupId', 'cycleId', 'memberUids', 'category', 'action', 'actorUid', 'actorName', 'title', 'changeDetail', 'dateEpochDay', 'createdAt']) &&
+             data.keys().hasOnly(['groupId', 'cycleId', 'memberUids', 'category', 'action', 'actorUid', 'actorName', 'targetMemberName', 'title', 'changeDetail', 'dateEpochDay', 'createdAt']) &&
+             data.groupId == groupId &&
+             isValidId(data.cycleId) &&
+             isValidMemberUidsList(data.memberUids) &&
+             data.category in ['MEAL', 'EXPENSE'] &&
+             data.action in ['ADDED', 'UPDATED', 'REMOVED'] &&
+             isValidId(data.actorUid) &&
+             data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 80 &&
+             (!('targetMemberName' in data) || data.targetMemberName == null || (data.targetMemberName is string && data.targetMemberName.size() <= 80)) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.changeDetail is string && data.changeDetail.size() >= 1 && data.changeDetail.size() <= 240 &&
+             data.dateEpochDay is int &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    // 4. Collection Rules
+
+    // Private User Profile (strict PII isolation)
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if isSignedIn() && request.auth.uid == userId;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserProfile(incoming(), userId);
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'activeGroupId', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    // Invite Code Lookup (get only by exact 6-char code; listing forbidden)
+    match /messInvites/{inviteCode} {
+      allow get: if isSignedIn() && isValidInviteCode(inviteCode);
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidInviteCode(inviteCode) &&
+                       isValidMessInvite(incoming(), inviteCode) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       getAfter(/databases/$(database)/documents/messGroups/$(incoming().groupId)).data.ownerUid == request.auth.uid;
+
+      allow update: if false;
+
+      allow delete: if isSignedIn() &&
+                       isValidInviteCode(inviteCode) &&
+                       existing().ownerUid == request.auth.uid;
+    }
+
+    // Mess Groups
+    match /messGroups/{groupId} {
+      allow get: if isSignedIn() && isValidId(groupId) && resource != null && (request.auth.uid in existing().memberUids);
+      allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+
+      allow create: if isSignedIn() &&
+                       isValidId(groupId) &&
+                       isValidMessGroup(incoming()) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       incoming().memberUids.size() == 1 &&
+                       (request.auth.uid in incoming().memberUids);
+
+      allow update: if isSignedIn() &&
+                       isValidId(groupId) &&
+                       isValidMessGroup(incoming()) &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().inviteCode == existing().inviteCode && (
+                         // Action A: Owner updates group configuration or active cycle
+                         (request.auth.uid == existing().ownerUid &&
+                          (existing().ownerUid in incoming().memberUids) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'currencySymbol', 'cycleMode', 'breakfastWeight', 'activeCycleId', 'memberUids', 'updatedAt'])) ||
+                         // Action B: Member switches active cycle
+                         ((request.auth.uid in existing().memberUids) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['activeCycleId', 'updatedAt'])) ||
+                         // Action C: Invited user joins group via valid invite code
+                         (!(request.auth.uid in existing().memberUids) &&
+                          (request.auth.uid in incoming().memberUids) &&
+                          incoming().memberUids.hasAll(existing().memberUids) &&
+                          incoming().memberUids.size() == existing().memberUids.size() + 1 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
+                          exists(/databases/$(database)/documents/messInvites/$(existing().inviteCode)) &&
+                          get(/databases/$(database)/documents/messInvites/$(existing().inviteCode)).data.groupId == groupId) ||
+                         // Action D: Non-owner member leaves group
+                         (request.auth.uid != existing().ownerUid &&
+                          (request.auth.uid in existing().memberUids) &&
+                          !(request.auth.uid in incoming().memberUids) &&
+                          existing().memberUids.hasAll(incoming().memberUids) &&
+                          incoming().memberUids.size() == existing().memberUids.size() - 1 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(groupId) && existing().ownerUid == request.auth.uid;
+
+      // Cycles Subcollection
+      match /cycles/{cycleId} {
+        allow get: if isSignedIn() && isValidId(groupId) && isValidId(cycleId) && (
+          (resource == null && isGroupMember(groupId)) ||
+          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+        );
+        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(cycleId) &&
+                         isValidMessCycle(incoming(), groupId) &&
+                         incoming().createdByUid == request.auth.uid &&
+                         (request.auth.uid in incoming().memberUids) &&
+                         (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
+
+        allow update: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(cycleId) &&
+                         isValidMessCycle(incoming(), groupId) &&
+                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         incoming().groupId == existing().groupId &&
+                         incoming().createdByUid == existing().createdByUid &&
+                         incoming().createdAt == existing().createdAt && (
+                           // Terminal lock: CLOSED cycles only allow memberUids sync
+                           (existing().status == 'CLOSED' &&
+                            incoming().status == 'CLOSED' &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])) ||
+                           (existing().status != 'CLOSED' &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['label', 'cycleType', 'startDateEpochDay', 'endDateEpochDay', 'status', 'memberUids', 'updatedAt']))
+                         );
+
+        allow delete: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(cycleId) &&
+                         (request.auth.uid in existing().memberUids) &&
+                         get(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid == request.auth.uid;
+      }
+
+      // Members Subcollection
+      match /members/{memberId} {
+        allow get: if isSignedIn() && isValidId(groupId) && isValidId(memberId) && (
+          (resource == null && isGroupMember(groupId)) ||
+          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+        );
+        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(memberId) &&
+                         isValidMessMember(incoming(), groupId) &&
+                         (request.auth.uid in incoming().memberUids) &&
+                         (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
+
+        allow update: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(memberId) &&
+                         isValidMessMember(incoming(), groupId) &&
+                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         incoming().groupId == existing().groupId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'linkedUid', 'role', 'isActive', 'memberUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(memberId) &&
+                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         get(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid == request.auth.uid;
+      }
+
+      // Meal Entries Subcollection
+      match /mealEntries/{entryId} {
+        allow get: if isSignedIn() && isValidId(groupId) && isValidId(entryId) && (
+          (resource == null && isGroupMember(groupId)) ||
+          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+        );
+        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(entryId) &&
+                         isValidMealEntry(incoming(), groupId) &&
+                         incoming().updatedByUid == request.auth.uid &&
+                         (request.auth.uid in incoming().memberUids) &&
+                         (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
+
+        allow update: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(entryId) &&
+                         isValidMealEntry(incoming(), groupId) &&
+                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         incoming().groupId == existing().groupId &&
+                         incoming().cycleId == existing().cycleId &&
+                         incoming().memberId == existing().memberId &&
+                         incoming().dateEpochDay == existing().dateEpochDay &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedByUid == request.auth.uid &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['breakfast', 'lunch', 'dinner', 'guestMeals', 'updatedByUid', 'memberUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(groupId) && isValidId(entryId) && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId));
+      }
+
+      // Transactions Subcollection (Bazaar, Fixed Utilities, Deposits, Settlements)
+      match /transactions/{txId} {
+        allow get: if isSignedIn() && isValidId(groupId) && isValidId(txId) && (
+          (resource == null && isGroupMember(groupId)) ||
+          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+        );
+        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(txId) &&
+                         isValidMessTransaction(incoming(), groupId) &&
+                         incoming().createdByUid == request.auth.uid &&
+                         (request.auth.uid in incoming().memberUids) &&
+                         (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
+
+        allow update: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(txId) &&
+                         isValidMessTransaction(incoming(), groupId) &&
+                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         incoming().groupId == existing().groupId &&
+                         incoming().cycleId == existing().cycleId &&
+                         incoming().createdByUid == existing().createdByUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['type', 'title', 'notes', 'amount', 'paidByMemberId', 'dateEpochDay', 'memberUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(groupId) && isValidId(txId) && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId));
+      }
+
+      // Activity Logs Subcollection (Immutable meal/expense attribution audit trail)
+      match /activityLogs/{activityId} {
+        allow get: if isSignedIn() && isValidId(groupId) && isValidId(activityId) && (
+          (resource == null && isGroupMember(groupId)) ||
+          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+        );
+        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(activityId) &&
+                         isValidMessActivityLog(incoming(), groupId) &&
+                         incoming().actorUid == request.auth.uid &&
+                         (request.auth.uid in incoming().memberUids) &&
+                         (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
+
+        allow update: if isSignedIn() &&
+                         isValidId(groupId) &&
+                         isValidId(activityId) &&
+                         isValidMessActivityLog(incoming(), groupId) &&
+                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         incoming().groupId == existing().groupId &&
+                         incoming().cycleId == existing().cycleId &&
+                         incoming().category == existing().category &&
+                         incoming().action == existing().action &&
+                         incoming().actorUid == existing().actorUid &&
+                         incoming().actorName == existing().actorName &&
+                         incoming().title == existing().title &&
+                         incoming().changeDetail == existing().changeDetail &&
+                         incoming().dateEpochDay == existing().dateEpochDay &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['memberUids']);
+
+        allow delete: if false;
+      }
+    }
+  }
+}
