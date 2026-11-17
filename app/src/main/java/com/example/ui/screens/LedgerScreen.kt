@@ -91,6 +91,9 @@ import java.util.Locale
 @Composable
 fun LedgerScreen(
   data: MessDashboardData,
+  isManager: Boolean,
+  onUnlockCycle: (String) -> Unit,
+  onResetGroupData: () -> Unit,
   onSettleMember: (MemberStanding) -> Unit,
   onAddMember: (String) -> Unit,
   onToggleMemberActive: (MessMember, Boolean) -> Unit,
@@ -110,6 +113,7 @@ fun LedgerScreen(
 
   var showAddMemberDialog by remember { mutableStateOf(false) }
   var showNewCycleDialog by remember { mutableStateOf(false) }
+  var showResetConfirmation by remember { mutableStateOf(false) }
   var pendingSettle by remember { mutableStateOf<MemberStanding?>(null) }
   var memberSearchQuery by remember { mutableStateOf("") }
   var expandedContributionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -176,6 +180,22 @@ fun LedgerScreen(
                 onClick = { onSwitchCycle(cycle.id) },
                 label = { Text("${cycle.label}$badge") },
               )
+            }
+          }
+          if (isManager && isClosed) {
+            OutlinedButton(
+              onClick = { onUnlockCycle(data.activeCycle.id) },
+              modifier = Modifier.testTag("unlock_closed_cycle_button"),
+            ) {
+              Text("Unlock closed cycle")
+            }
+          }
+          if (isManager) {
+            OutlinedButton(
+              onClick = { showResetConfirmation = true },
+              modifier = Modifier.testTag("reset_group_data_button"),
+            ) {
+              Text("Reset group data")
             }
           }
         }
@@ -334,6 +354,13 @@ fun LedgerScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
               ) {
+                MemberAvatar(
+                  name = member.name,
+                  photoBase64 = member.avatarBase64,
+                  size = 38.dp,
+                  modifier = Modifier.testTag("member_avatar_${member.id}"),
+                )
+                Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                   Text(member.name, style = MaterialTheme.typography.titleSmall)
                   Text(
@@ -341,7 +368,7 @@ fun LedgerScreen(
                       buildString {
                         append(if (member.role == "MANAGER") "Manager" else "Member")
                         append(" · ")
-                        append(if (member.linkedUid.isNotBlank()) "Google Linked" else "Managed Offline")
+                        append(if (member.linkedUid.isNotBlank()) "Account linked" else "Managed offline")
                         if (memberContrib != null && memberContrib.totalContributed > 0.0) {
                           append(" · Contributed ")
                           append(MessCalculator.formatAmount(memberContrib.totalContributed, currency))
@@ -486,6 +513,30 @@ fun LedgerScreen(
       onConfirm = { mode, closePrev, rollover ->
         onStartNewCycle(mode, closePrev, rollover)
         showNewCycleDialog = false
+      },
+    )
+  }
+
+  if (showResetConfirmation) {
+    AlertDialog(
+      onDismissRequest = { showResetConfirmation = false },
+      title = { Text("Reset group data?") },
+      text = {
+        Text("This permanently clears meal, expense, cycle, and activity records and resets group settings to defaults. The group name, membership, and member profiles/photos will stay.")
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            onResetGroupData()
+            showResetConfirmation = false
+          },
+          modifier = Modifier.testTag("confirm_reset_group_data_button"),
+        ) {
+          Text("Reset group data")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showResetConfirmation = false }) { Text("Cancel") }
       },
     )
   }

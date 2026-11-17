@@ -25,7 +25,9 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.DocumentSnapshot.ServerTimestampBehavior
+import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
@@ -634,6 +636,28 @@ class MessRepository(
     }
   }
 
+  suspend fun updateMyMemberPhoto(
+    groupId: String,
+    member: MessMember,
+    avatarBase64: String?,
+  ): Result<Unit> = runCatching {
+    val uid = requireUserId()
+    require(member.linkedUid == uid) { "You can only update your own member profile photo." }
+    require(avatarBase64 == null || avatarBase64.length <= 90_000) { "Photo is too large. Choose a smaller image." }
+    val memberRef = db.collection("messGroups").document(groupId).collection("members").document(member.id)
+    val updates = mutableMapOf<String, Any>("updatedAt" to FieldValue.serverTimestamp())
+    if (avatarBase64 == null) updates["avatarBase64"] = FieldValue.delete()
+    else updates["avatarBase64"] = avatarBase64
+    try {
+      memberRef.update(updates).await()
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, memberRef.path)
+      throw e
+    }
+  }
+
   suspend fun updateMemberActive(
     groupId: String,
     member: MessMember,
@@ -1139,6 +1163,106 @@ class MessRepository(
     }
   }
 
+  suspend fun unlockCycle(groupId: String, cycleId: String): Result<Unit> = runCatching {
+    val uid = requireUserId()
+    val groupRef = db.collection("messGroups").document(groupId)
+    val group = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)
+      ?: throw IllegalStateException("This group is no longer available.")
+    check(group.ownerUid == uid) { "Only the group manager can unlock a closed cycle." }
+    val cycleRef = groupRef.collection("cycles").document(cycleId)
+    val cycle = cycleRef.get(Source.SERVER).await().toObject(MessCycle::class.java)
+      ?: throw IllegalStateException("This cycle is no longer available.")
+    check(cycle.status == CycleStatus.CLOSED.name) { "This cycle is already unlocked." }
+    try {
+      cycleRef.update(
+        mapOf("status" to CycleStatus.ACTIVE.name, "updatedAt" to FieldValue.serverTimestamp())
+      ).await()
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, cycleRef.path)
+      throw e
+    }
+  }
+
+  suspend fun resetGroupData(groupId: String): Result<Unit> = runCatching {
+    val uid = requireUserId()
+    val groupRef = db.collection("messGroups").document(groupId)
+    val group = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)
+      ?: throw IllegalStateException("This group is no longer available.")
+    check(group.ownerUid == uid) { "Only the group manager can reset group data." }
+    check(uid in group.memberUids) { "You are no longer a member of this group." }
+
+    // Reset settings first so missing deployed permissions stop the operation before any
+    // operational records are deleted. Keep group identity, membership, and member profiles.
+    val mode = CycleMode.MONTHLY
+    val defaultWeekStartDay = 6 // Preserve the app's legacy Saturday default.
+    val defaultCustomWeekStartEpochDay = -1L
+    groupRef.update(
+      mapOf(
+        "currencySymbol" to "৳",
+        "cycleMode" to mode.name,
+        "weekStartDay" to defaultWeekStartDay,
+        "customWeekStartEpochDay" to defaultCustomWeekStartEpochDay,
+        "breakfastWeight" to FieldValue.delete(),
+        "updatedAt" to FieldValue.serverTimestamp(),
+      )
+    ).await()
+
+    // Delete audit logs first; deployed manager-only delete rules are required for a full reset.
+    for (collectionName in listOf("activityLogs", "cycles", "mealEntries", "transactions")) {
+      val collection = groupRef.collection(collectionName)
+      var lastDocument: DocumentSnapshot? = null
+      while (true) {
+        val ordered = collection.whereArrayContains("memberUids", uid).orderBy(FieldPath.documentId())
+        val pageQuery = (if (lastDocument == null) ordered else ordered.startAfter(lastDocument)).limit(400)
+        val page = pageQuery.get(Source.SERVER).await()
+        if (page.isEmpty) break
+        val batch = db.batch()
+        page.documents.forEach { batch.delete(it.reference) }
+        batch.commit().await()
+        lastDocument = page.documents.last()
+        if (page.size() < 400) break
+      }
+    }
+
+    // Start a fresh cycle from the reset default settings; retain the group's identity,
+    // invite, membership, and member documents (including photos).
+    val (label, startDay, endDay) = defaultCycleBounds(
+      mode,
+      LocalDate.now(),
+      defaultWeekStartDay,
+      defaultCustomWeekStartEpochDay,
+    )
+    val cycleRef = groupRef.collection("cycles").document()
+    val batch = db.batch()
+    batch.set(
+      cycleRef,
+      mapOf(
+        "groupId" to group.id,
+        "memberUids" to group.memberUids,
+        "label" to label,
+        "cycleType" to mode.name,
+        "startDateEpochDay" to startDay,
+        "endDateEpochDay" to endDay,
+        "status" to CycleStatus.ACTIVE.name,
+        "createdByUid" to uid,
+        "createdAt" to FieldValue.serverTimestamp(),
+        "updatedAt" to FieldValue.serverTimestamp(),
+      ),
+    )
+    batch.update(
+      groupRef,
+      mapOf("activeCycleId" to cycleRef.id, "updatedAt" to FieldValue.serverTimestamp()),
+    )
+    batch.commit().await()
+    Unit
+  }.onFailure { error ->
+    if (error !is CancellationException) {
+      handleFirestoreError(error, OperationType.DELETE, "messGroups/$groupId/reset")
+    }
+  }
+
   suspend fun switchActiveCycle(groupId: String, cycleId: String): Result<Unit> = runCatching {
     requireUserId()
     val groupRef = db.collection("messGroups").document(groupId)
@@ -1164,7 +1288,8 @@ class MessRepository(
     val uid = requireUserId()
     val groupRef = db.collection("messGroups").document(group.id)
     val cycleRef = groupRef.collection("cycles").document()
-    val (label, startDay, endDay) = defaultCycleBounds(cycleMode, referenceDate)
+    val (label, startDay, endDay) =
+      defaultCycleBounds(cycleMode, referenceDate, group.weekStartDay, group.customWeekStartEpochDay)
 
     val batch = db.batch()
     if (!closePreviousCycleId.isNullOrBlank()) {
@@ -1232,8 +1357,12 @@ class MessRepository(
     name: String,
     currencySymbol: String,
     cycleMode: CycleMode,
+    weekStartDay: Int = group.weekStartDay,
+    customWeekStartEpochDay: Long = group.customWeekStartEpochDay,
   ): Result<Unit> = runCatching {
     requireUserId()
+    require(weekStartDay in 1..7) { "Choose a valid week-start day." }
+    require(customWeekStartEpochDay >= -1L) { "Choose a valid custom week-start date." }
     val groupRef = db.collection("messGroups").document(group.id)
     try {
       groupRef
@@ -1242,6 +1371,8 @@ class MessRepository(
             "name" to name.trim().take(80),
             "currencySymbol" to currencySymbol.ifBlank { "৳" }.take(6),
             "cycleMode" to cycleMode.name,
+            "weekStartDay" to weekStartDay,
+            "customWeekStartEpochDay" to customWeekStartEpochDay,
             "updatedAt" to FieldValue.serverTimestamp(),
           )
         )
@@ -1414,7 +1545,12 @@ class MessRepository(
     fun generateInviteCode(): String =
       CharArray(6) { INVITE_CHARS[RANDOM.nextInt(INVITE_CHARS.size)] }.concatToString()
 
-    fun defaultCycleBounds(mode: CycleMode, referenceDate: LocalDate): Triple<String, Long, Long> {
+    fun defaultCycleBounds(
+      mode: CycleMode,
+      referenceDate: LocalDate,
+      weekStartDay: Int = DayOfWeek.SATURDAY.value,
+      customWeekStartEpochDay: Long = -1L,
+    ): Triple<String, Long, Long> {
       return when (mode) {
         CycleMode.MONTHLY -> {
           val start = referenceDate.withDayOfMonth(1)
@@ -1423,7 +1559,13 @@ class MessRepository(
           Triple(label, start.toEpochDay(), end.toEpochDay())
         }
         CycleMode.WEEKLY -> {
-          val start = referenceDate.with(TemporalAdjusters.previousOrSame(DayOfWeek.SATURDAY))
+          val start = if (customWeekStartEpochDay >= 0L) {
+            val weeksFromAnchor = Math.floorDiv(referenceDate.toEpochDay() - customWeekStartEpochDay, 7L)
+            LocalDate.ofEpochDay(customWeekStartEpochDay + weeksFromAnchor * 7L)
+          } else {
+            val safeDay = weekStartDay.coerceIn(1, 7)
+            referenceDate.with(TemporalAdjusters.previousOrSame(DayOfWeek.of(safeDay)))
+          }
           val end = start.plusDays(6)
           val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.US)
           val label = "${start.format(fmt)} – ${end.format(fmt)}"

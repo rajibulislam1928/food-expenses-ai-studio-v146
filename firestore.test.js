@@ -162,6 +162,50 @@ test("Invite codes forbid listing, allow exact get, and allow invited user to jo
   await assertFails(charlieDb.collection("messGroups").doc("group_1").get());
 });
 
+test("Members can set only their own bounded profile photo, visible to their group", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupId = "avatar_group";
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection("messGroups").doc(groupId).set({
+      name: "Avatar Mess",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      inviteCode: "AVT123",
+      currencySymbol: "৳",
+      cycleMode: "MONTHLY",
+      activeCycleId: "cycle1",
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+    const members = db.collection("messGroups").doc(groupId).collection("members");
+    for (const [id, uid, name] of [["alice_member", ALICE_UID, "Alice"], ["bob_member", BOB_UID, "Bob"]]) {
+      await members.doc(id).set({
+        groupId,
+        memberUids: [ALICE_UID, BOB_UID],
+        name,
+        linkedUid: uid,
+        role: id === "alice_member" ? "MANAGER" : "MEMBER",
+        isActive: true,
+        createdAt: pastTimestamp(),
+        updatedAt: pastTimestamp(),
+      });
+    }
+  });
+
+  const aliceMember = aliceDb.collection("messGroups").doc(groupId).collection("members").doc("alice_member");
+  const bobMember = bobDb.collection("messGroups").doc(groupId).collection("members").doc("bob_member");
+  await assertSucceeds(aliceMember.update({ avatarBase64: "Zm9v", updatedAt: pastTimestamp() }));
+  const visible = await assertSucceeds(bobDb.collection("messGroups").doc(groupId).collection("members").doc("alice_member").get());
+  if (visible.data().avatarBase64 !== "Zm9v") throw new Error("Group member photo was not visible to another member");
+  await assertSucceeds(bobMember.update({ avatarBase64: "YmFy", updatedAt: pastTimestamp() }));
+  await assertFails(bobDb.collection("messGroups").doc(groupId).collection("members").doc("alice_member").update({ avatarBase64: "YmFy", updatedAt: pastTimestamp() }));
+  await assertFails(aliceMember.update({ name: "Changed with photo", avatarBase64: "bmV3", updatedAt: pastTimestamp() }));
+  await assertFails(aliceMember.update({ avatarBase64: "x".repeat(90001), updatedAt: pastTimestamp() }));
+});
+
 test("Transactions enforce positive amounts, valid types, and member isolation", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const charlieDb = testEnv.authenticatedContext(CHARLIE_UID).firestore();
@@ -230,6 +274,7 @@ test("Transactions enforce positive amounts, valid types, and member isolation",
 
 test("Closed cycle enforces terminal state lock", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
   const groupRef = aliceDb.collection("messGroups").doc("group_3");
   const cycleRef = groupRef.collection("cycles").doc("c_closed");
 
@@ -270,9 +315,16 @@ test("Closed cycle enforces terminal state lock", async () => {
     })
   );
 
-  // Cannot reopen or rename closed cycle
-  await assertFails(
+  // The manager can reopen a closed cycle; a non-manager cannot.
+  await assertSucceeds(
     cycleRef.update({
+      status: "ACTIVE",
+      updatedAt: pastTimestamp(),
+    })
+  );
+  await assertSucceeds(cycleRef.update({ status: "CLOSED", updatedAt: pastTimestamp() }));
+  await assertFails(
+    bobDb.collection("messGroups").doc("group_3").collection("cycles").doc("c_closed").update({
       status: "ACTIVE",
       updatedAt: pastTimestamp(),
     })
@@ -480,8 +532,9 @@ test("ActivityLogs enforce actorUid authenticity, immutable content, and member 
     })
   );
 
-  // Delete is rejected
-  await assertFails(logsCol.doc("log_1").delete());
+  // Only the manager can remove audit logs during a reset.
+  await assertFails(bobDb.collection("messGroups").doc("group_logs").collection("activityLogs").doc("log_1").delete());
+  await assertSucceeds(logsCol.doc("log_1").delete());
 
   // Outsider Charlie cannot list all activity logs, query Alice's logs, or read Alice's log doc
   await assertFails(

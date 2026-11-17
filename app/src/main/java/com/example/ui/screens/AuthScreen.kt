@@ -24,29 +24,31 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,18 +61,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.credentials.CredentialManager
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
-import com.example.auth.attemptAutoSignIn
-import com.example.auth.onGoogleSignInClicked
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -78,74 +79,38 @@ fun AuthScreen(
   onAuthSuccess: () -> Unit,
 ) {
   val context = LocalContext.current
-  val lifecycleOwner = LocalLifecycleOwner.current
   val scope = rememberCoroutineScope()
-  val credentialManager = remember(context) { CredentialManager.create(context) }
-
   var isLoading by remember { mutableStateOf(false) }
+  var isCreatingAccount by remember { mutableStateOf(false) }
+  var email by remember { mutableStateOf("") }
+  var password by remember { mutableStateOf("") }
+  var passwordVisible by remember { mutableStateOf(false) }
   var errorMessage by remember { mutableStateOf<String?>(null) }
-  var autoSignInAttempted by remember { mutableStateOf(false) }
-  var autoSignInJob by remember { mutableStateOf<Job?>(null) }
+  var statusMessage by remember { mutableStateOf<String?>(null) }
 
-  // Decode hero illustration off the main thread so the first Compose frame renders immediately.
   val heroBitmap by
     produceState<ImageBitmap?>(initialValue = null, context) {
-      value =
-        withContext(Dispatchers.IO) {
-          runCatching {
-            val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
-            BitmapFactory.decodeResource(context.resources, R.drawable.img_mess_hero, options)
-              ?.asImageBitmap()
-          }.getOrNull()
-        }
-    }
-
-  // Wait until the first frames are drawn and window surface sync finishes before silent credential IPC.
-  LaunchedEffect(lifecycleOwner) {
-    if (autoSignInAttempted) return@LaunchedEffect
-    lifecycleOwner.lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
-    withFrameNanos {}
-    withFrameNanos {}
-    delay(300L)
-    if (!isLoading && !autoSignInAttempted) {
-      autoSignInAttempted = true
-      val job = launch {
-        attemptAutoSignIn(
-          context = context,
-          credentialManager = credentialManager,
-          onAuthSuccess = onAuthSuccess,
-          onUnauthenticated = {},
-        )
+      value = withContext(Dispatchers.IO) {
+        runCatching {
+          val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+          BitmapFactory.decodeResource(context.resources, R.drawable.img_mess_hero, options)?.asImageBitmap()
+        }.getOrNull()
       }
-      autoSignInJob = job
-      job.join()
     }
-  }
 
-  Scaffold(
-    containerColor = MaterialTheme.colorScheme.background,
-  ) { innerPadding ->
+  Scaffold(containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
     Box(
-      modifier =
-        Modifier.fillMaxSize()
-          .background(
-            Brush.verticalGradient(
-              colors =
-                listOf(
-                  MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
-                  MaterialTheme.colorScheme.background,
-                )
-            )
-          )
-          .padding(innerPadding),
+      modifier = Modifier.fillMaxSize()
+        .background(Brush.verticalGradient(listOf(
+          MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+          MaterialTheme.colorScheme.background,
+        )))
+        .padding(innerPadding),
       contentAlignment = Alignment.Center,
     ) {
       Column(
-        modifier =
-          Modifier.fillMaxWidth()
-            .widthIn(max = 520.dp)
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
+        modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp)
+          .verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp),
       ) {
@@ -156,153 +121,139 @@ fun AuthScreen(
           colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         ) {
           Box(
-            modifier =
-              Modifier.fillMaxSize()
-                .background(
-                  Brush.linearGradient(
-                    colors =
-                      listOf(
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-                        MaterialTheme.colorScheme.primaryContainer,
-                      )
-                  )
-                ),
+            modifier = Modifier.fillMaxSize().background(Brush.linearGradient(listOf(
+              MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
+              MaterialTheme.colorScheme.primaryContainer,
+            ))),
             contentAlignment = Alignment.Center,
           ) {
-            Icon(
-              imageVector = Icons.Filled.Restaurant,
-              contentDescription = null,
-              tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
-              modifier = Modifier.size(48.dp),
-            )
+            Icon(Icons.Filled.Restaurant, contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f), modifier = Modifier.size(48.dp))
             val loadedBitmap = heroBitmap
-            androidx.compose.animation.AnimatedVisibility(
-              visible = loadedBitmap != null,
-              enter = fadeIn(animationSpec = tween(durationMillis = 220)),
-              modifier = Modifier.fillMaxSize(),
-            ) {
-              if (loadedBitmap != null) {
-                Image(
-                  bitmap = loadedBitmap,
-                  contentDescription = "Food Expenses shared kitchen ledger illustration",
-                  modifier = Modifier.fillMaxSize(),
-                  contentScale = ContentScale.Crop,
-                )
-              }
+            androidx.compose.animation.AnimatedVisibility(visible = loadedBitmap != null, enter = fadeIn(tween(220)), modifier = Modifier.fillMaxSize()) {
+              if (loadedBitmap != null) Image(bitmap = loadedBitmap,
+                contentDescription = "Food Expenses shared kitchen ledger illustration",
+                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
           }
         }
 
-        Column(
-          horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-          Text(
-            text = stringResource(R.string.app_name),
-            style = MaterialTheme.typography.displaySmall,
-            color = MaterialTheme.colorScheme.onBackground,
-          )
-          Text(
-            text = stringResource(R.string.tagline_subtitle),
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text(stringResource(R.string.app_name), style = MaterialTheme.typography.displaySmall,
+            color = MaterialTheme.colorScheme.onBackground)
+          Text(stringResource(R.string.tagline_subtitle), style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
-        Card(
-          modifier = Modifier.fillMaxWidth(),
-          shape = RoundedCornerShape(20.dp),
-          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        ) {
-          Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-          ) {
-            FeatureRow(
-              icon = Icons.Filled.Restaurant,
-              title = "Daily Meal Matrix & Live Rate",
-              subtitle = "Track lunch, dinner & guests with automatic per-meal rate math.",
-            )
-            FeatureRow(
-              icon = Icons.Filled.CloudSync,
-              title = "Real-Time Roommate Sync",
-              subtitle = "Invite hostel mates with a 6-character code so everyone sees live balances.",
-            )
-            FeatureRow(
-              icon = Icons.Filled.TableChart,
-              title = "Excel (.xlsx) Backup & Restore",
-              subtitle = "Export multi-sheet monthly or weekly reports directly to your device.",
-            )
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp),
+          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+          Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            FeatureRow(Icons.Filled.Restaurant, "Daily Meal Matrix & Live Rate",
+              "Track lunch, dinner & guests with automatic per-meal rate math.")
+            FeatureRow(Icons.Filled.CloudSync, "Real-Time Roommate Sync",
+              "Invite hostel mates with a 6-character code so everyone sees live balances.")
+            FeatureRow(Icons.Filled.TableChart, "Excel (.xlsx) Backup & Restore",
+              "Export multi-sheet monthly or weekly reports directly to your device.")
           }
         }
 
-        if (errorMessage != null) {
-          Surface(
-            color = MaterialTheme.colorScheme.errorContainer,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth(),
-          ) {
-            Text(
-              text = errorMessage.orEmpty(),
-              color = MaterialTheme.colorScheme.onErrorContainer,
-              style = MaterialTheme.typography.bodyMedium,
-              modifier = Modifier.padding(14.dp),
-            )
+        Text(if (isCreatingAccount) "Create your account" else "Sign in with email",
+          style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(value = email, onValueChange = { email = it; errorMessage = null },
+          modifier = Modifier.fillMaxWidth().testTag("email_field"), label = { Text("Email") },
+          singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+        OutlinedTextField(value = password, onValueChange = { password = it; errorMessage = null },
+          modifier = Modifier.fillMaxWidth().testTag("password_field"), label = { Text("Password") },
+          singleLine = true,
+          visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+          trailingIcon = {
+            IconButton(onClick = { passwordVisible = !passwordVisible },
+              modifier = Modifier.testTag("password_visibility_toggle")) {
+              Icon(
+                imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                contentDescription = if (passwordVisible) "Hide password" else "Show password",
+              )
+            }
+          },
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+
+        errorMessage?.let {
+          Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()) {
+            Text(it, color = MaterialTheme.colorScheme.onErrorContainer,
+              style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(14.dp))
           }
+        }
+        statusMessage?.let {
+          Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
         }
 
         Button(
           onClick = {
-            autoSignInAttempted = true
-            autoSignInJob?.cancel()
-            autoSignInJob = null
-            errorMessage = null
-            isLoading = true
-            onGoogleSignInClicked(
-              context = context,
-              credentialManager = credentialManager,
-              onAuthSuccess = {
-                isLoading = false
-                onAuthSuccess()
-              },
-              onAuthError = { msg ->
-                isLoading = false
-                errorMessage = msg
-              },
-              scope = scope,
-              onAuthCancelled = { isLoading = false },
-            )
+            val cleanEmail = email.trim()
+            when {
+              cleanEmail.isBlank() -> errorMessage = "Enter your email address."
+              !android.util.Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches() -> errorMessage = "Enter a valid email address."
+              password.isBlank() -> errorMessage = "Enter your password."
+              isCreatingAccount && password.length < 6 -> errorMessage = "Use a password with at least 6 characters."
+              else -> {
+                isLoading = true
+                errorMessage = null
+                statusMessage = null
+                scope.launch {
+                  try {
+                    if (isCreatingAccount) {
+                      Firebase.auth.createUserWithEmailAndPassword(cleanEmail, password).await()
+                    } else {
+                      Firebase.auth.signInWithEmailAndPassword(cleanEmail, password).await()
+                    }
+                    onAuthSuccess()
+                  } catch (e: Exception) {
+                    errorMessage = e.localizedMessage ?: if (isCreatingAccount) "Account creation failed. Please try again." else "Sign in failed. Please check your details."
+                  } finally {
+                    isLoading = false
+                  }
+                }
+              }
+            }
           },
           enabled = !isLoading,
-          modifier =
-            Modifier.fillMaxWidth()
-              .height(56.dp)
-              .testTag("google_sign_in_button"),
+          modifier = Modifier.fillMaxWidth().height(56.dp).testTag("email_auth_button"),
           shape = RoundedCornerShape(16.dp),
-          colors =
-            ButtonDefaults.buttonColors(
-              containerColor = MaterialTheme.colorScheme.primary,
-              contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
         ) {
-          if (isLoading) {
-            CircularProgressIndicator(
-              modifier = Modifier.size(22.dp),
-              color = MaterialTheme.colorScheme.onPrimary,
-              strokeWidth = 2.5.dp,
-            )
-          } else {
-            Icon(
-              imageVector = Icons.AutoMirrored.Filled.Login,
-              contentDescription = null,
-              modifier = Modifier.size(20.dp),
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-              text = stringResource(R.string.sign_in_with_google),
-              style = MaterialTheme.typography.titleMedium,
-            )
+          if (isLoading) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+          else Text(if (isCreatingAccount) "Create account" else "Sign in", style = MaterialTheme.typography.titleMedium)
+        }
+
+        if (!isCreatingAccount) {
+          TextButton(onClick = {
+            val cleanEmail = email.trim()
+            if (!android.util.Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches()) {
+              errorMessage = "Enter your email above, then tap Forgot password."
+              return@TextButton
+            }
+            isLoading = true
+            errorMessage = null
+            statusMessage = null
+            scope.launch {
+              try {
+                Firebase.auth.sendPasswordResetEmail(cleanEmail).await()
+                statusMessage = "Password reset email sent. Check your inbox."
+              } catch (e: Exception) {
+                errorMessage = e.localizedMessage ?: "Could not send the reset email. Please try again."
+              } finally { isLoading = false }
+            }
+          }, enabled = !isLoading, modifier = Modifier.testTag("forgot_password_button")) {
+            Text("Forgot password?")
           }
+        }
+        TextButton(onClick = {
+          isCreatingAccount = !isCreatingAccount
+          passwordVisible = false
+          errorMessage = null
+          statusMessage = null
+        }, enabled = !isLoading, modifier = Modifier.testTag("auth_mode_toggle")) {
+          Text(if (isCreatingAccount) "Already have an account? Sign in" else "Create a new account")
         }
       }
     }

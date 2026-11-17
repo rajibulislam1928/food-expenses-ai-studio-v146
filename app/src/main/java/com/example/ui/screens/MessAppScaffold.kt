@@ -45,6 +45,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
@@ -103,6 +106,7 @@ import com.example.ui.MessTab
 import com.example.ui.MessUiState
 import com.example.ui.MessViewModel
 import java.text.SimpleDateFormat
+import java.time.LocalDate
 import java.util.Date
 import java.util.Locale
 
@@ -321,6 +325,11 @@ private fun MessDashboardContent(
       }
     }
 
+  val profilePhotoLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+      if (uri != null) viewModel.updateMyProfilePhoto(uri)
+    }
+
   val navItems = remember {
     listOf(
       NavDestinationItem(MessTab.OVERVIEW, R.string.nav_overview, Icons.Filled.Dashboard, "nav_overview"),
@@ -459,9 +468,11 @@ private fun MessDashboardContent(
                   onClick = { showAccountMenu = true },
                   modifier = Modifier.minimumInteractiveComponentSize().testTag("account_menu_button"),
                 ) {
-                  Icon(
-                    imageVector = Icons.Filled.AccountCircle,
-                    contentDescription = "Account menu",
+                  MemberAvatar(
+                    name = data.members.firstOrNull { it.linkedUid == data.currentUserId }?.name ?: userDisplayName,
+                    photoBase64 = data.members.firstOrNull { it.linkedUid == data.currentUserId }?.avatarBase64.orEmpty(),
+                    size = 30.dp,
+                    modifier = Modifier.testTag("my_profile_avatar"),
                   )
                 }
                 DropdownMenu(
@@ -489,6 +500,31 @@ private fun MessDashboardContent(
                       text = "Synced at $formattedSync",
                       style = MaterialTheme.typography.labelSmall,
                       color = MaterialTheme.colorScheme.primary,
+                    )
+                  }
+                  HorizontalDivider()
+                  DropdownMenuItem(
+                    text = {
+                      Text(
+                        if (data.members.firstOrNull { it.linkedUid == data.currentUserId }?.avatarBase64.isNullOrBlank())
+                          "Add profile photo" else "Change profile photo"
+                      )
+                    },
+                    leadingIcon = { Icon(Icons.Filled.AccountCircle, contentDescription = null) },
+                    modifier = Modifier.testTag("profile_photo_menu_item"),
+                    onClick = {
+                      showAccountMenu = false
+                      profilePhotoLauncher.launch("image/*")
+                    },
+                  )
+                  if (!data.members.firstOrNull { it.linkedUid == data.currentUserId }?.avatarBase64.isNullOrBlank()) {
+                    DropdownMenuItem(
+                      text = { Text("Remove profile photo") },
+                      leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null) },
+                      onClick = {
+                        showAccountMenu = false
+                        viewModel.updateMyProfilePhoto(null)
+                      },
                     )
                   }
                   HorizontalDivider()
@@ -617,6 +653,10 @@ private fun MessDashboardContent(
             MessTab.LEDGER -> {
               LedgerScreen(
                 data = data,
+                isManager = data.activeGroup.ownerUid == data.currentUserId &&
+                  data.members.any { it.linkedUid == data.currentUserId && it.role == "MANAGER" },
+                onUnlockCycle = viewModel::unlockCycle,
+                onResetGroupData = viewModel::resetGroupData,
                 onSettleMember = viewModel::settleMemberBalance,
                 onAddMember = viewModel::addMember,
                 onToggleMemberActive = viewModel::toggleMemberActive,
@@ -743,8 +783,8 @@ private fun MessDashboardContent(
     GroupSettingsDialog(
       group = data.activeGroup,
       onDismiss = { showGroupSettings = false },
-      onSave = { name, currency, mode ->
-        viewModel.updateGroupSettings(name, currency, mode)
+      onSave = { name, currency, mode, weekStartDay, customWeekStartEpochDay ->
+        viewModel.updateGroupSettings(name, currency, mode, weekStartDay, customWeekStartEpochDay)
         showGroupSettings = false
       },
     )
@@ -815,17 +855,21 @@ private fun MessDashboardContent(
   }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GroupSettingsDialog(
   group: MessGroup,
   onDismiss: () -> Unit,
-  onSave: (String, String, CycleMode) -> Unit,
+  onSave: (String, String, CycleMode, Int, Long) -> Unit,
 ) {
   var name by remember(group.id) { mutableStateOf(group.name) }
   var currency by remember(group.id) { mutableStateOf(group.currencySymbol) }
   var mode by remember(group.id) {
     mutableStateOf(CycleMode.entries.firstOrNull { it.name == group.cycleMode } ?: CycleMode.MONTHLY)
   }
+  var weekStartDay by remember(group.id) { mutableStateOf(group.weekStartDay.coerceIn(1, 7)) }
+  var customWeekStartEpochDay by remember(group.id) { mutableStateOf(group.customWeekStartEpochDay) }
+  var showWeekStartDatePicker by remember { mutableStateOf(false) }
 
   AlertDialog(
     onDismissRequest = onDismiss,
@@ -859,11 +903,38 @@ private fun GroupSettingsDialog(
             )
           }
         }
+        if (mode == CycleMode.WEEKLY) {
+          Text("Week starts", style = MaterialTheme.typography.labelLarge)
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+              selected = customWeekStartEpochDay < 0L && weekStartDay == java.time.DayOfWeek.SATURDAY.value,
+              onClick = { weekStartDay = java.time.DayOfWeek.SATURDAY.value; customWeekStartEpochDay = -1L },
+              label = { Text("Saturday") },
+            )
+            FilterChip(
+              selected = customWeekStartEpochDay < 0L && weekStartDay == java.time.DayOfWeek.SUNDAY.value,
+              onClick = { weekStartDay = java.time.DayOfWeek.SUNDAY.value; customWeekStartEpochDay = -1L },
+              label = { Text("Sunday") },
+            )
+            FilterChip(
+              selected = customWeekStartEpochDay >= 0L,
+              onClick = { showWeekStartDatePicker = true },
+              label = {
+                Text(if (customWeekStartEpochDay >= 0L) "Custom: ${LocalDate.ofEpochDay(customWeekStartEpochDay)}" else "Custom date")
+              },
+            )
+          }
+          Text(
+            "Applies to new weekly cycles; existing cycle dates stay unchanged.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
       }
     },
     confirmButton = {
       Button(
-        onClick = { onSave(name, currency, mode) },
+        onClick = { onSave(name, currency, mode, weekStartDay, customWeekStartEpochDay) },
         enabled = name.isNotBlank(),
         modifier = Modifier.testTag("save_group_settings_button"),
       ) {
@@ -874,4 +945,20 @@ private fun GroupSettingsDialog(
       TextButton(onClick = onDismiss) { Text("Cancel") }
     },
   )
+
+  if (showWeekStartDatePicker) {
+    val pickerState = rememberDatePickerState(
+      initialSelectedDateMillis = (if (customWeekStartEpochDay >= 0L) customWeekStartEpochDay else LocalDate.now().toEpochDay()) * 86_400_000L,
+    )
+    DatePickerDialog(
+      onDismissRequest = { showWeekStartDatePicker = false },
+      confirmButton = {
+        TextButton(onClick = {
+          pickerState.selectedDateMillis?.let { customWeekStartEpochDay = Math.floorDiv(it, 86_400_000L) }
+          showWeekStartDatePicker = false
+        }) { Text("Set start date") }
+      },
+      dismissButton = { TextButton(onClick = { showWeekStartDatePicker = false }) { Text("Cancel") } },
+    ) { DatePicker(state = pickerState) }
+  }
 }

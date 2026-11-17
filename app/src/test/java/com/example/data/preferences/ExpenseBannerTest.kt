@@ -18,9 +18,9 @@ import org.robolectric.annotation.Config
 class ExpenseBannerTest {
 
   @Test
-  fun `app build config matches v1_4_6 and versionCode 46`() {
-    assertEquals(46, BuildConfig.VERSION_CODE)
-    assertEquals("1.4.6", BuildConfig.VERSION_NAME)
+  fun `app build config matches v1_4_12 and versionCode 52`() {
+    assertEquals(52, BuildConfig.VERSION_CODE)
+    assertEquals("1.4.12", BuildConfig.VERSION_NAME)
   }
 
   @Test
@@ -33,6 +33,6 @@ class ExpenseBannerTest {
 
       prefs.dismissBannerForVersion("1.4.6")
       assertFalse(prefs.isBannerVisible("1.4.6").first())
-      assertTrue(prefs.isBannerVisible("1.4.7").first())
+      assertTrue(prefs.isBannerVisible("1.4.10").first())
     }
 }

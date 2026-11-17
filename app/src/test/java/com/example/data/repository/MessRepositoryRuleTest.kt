@@ -2,18 +2,84 @@ package com.example.data.repository
 
 import com.example.base.FirestoreEmulatorTestBase
 import com.example.data.model.CycleMode
+import com.example.data.model.MessGroup
+import com.example.data.model.MessMember
 import com.example.data.model.TransactionType
 import com.google.firebase.firestore.FirebaseFirestoreException
 import java.time.LocalDate
 import java.util.UUID
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MessRepositoryRuleTest : FirestoreEmulatorTestBase() {
+
+  @Test
+  fun managerReset_clearsOperationalRecordsAndKeepsMemberPhotos() = runBlocking {
+    val suffix = UUID.randomUUID().toString().take(8)
+    val uid = signInTestUser("reset_$suffix@test.com")
+    val repo = MessRepository(firestore, auth)
+    val groupId = repo.createMessGroup(
+      name = "Reset Test $suffix",
+      currencySymbol = "₹",
+      cycleMode = CycleMode.WEEKLY,
+      creatorMemberName = "Manager",
+      initialMemberNames = listOf("Rahim"),
+    ).getOrThrow()
+    val groupRef = firestore.collection("messGroups").document(groupId)
+    val group = groupRef.get().await().toObject(MessGroup::class.java)!!
+    val managerMember = groupRef.collection("members")
+      .whereArrayContains("memberUids", uid).whereEqualTo("linkedUid", uid).get().await()
+      .documents.first().toObject(MessMember::class.java)!!
+    val currentCycleId = group.activeCycleId
+    repo.updateMyMemberPhoto(groupId, managerMember, "cGhvdG8=").getOrThrow()
+
+    repo.upsertMealEntry(
+      group = group,
+      cycleId = currentCycleId,
+      memberId = managerMember.id,
+      dateEpochDay = LocalDate.now().toEpochDay(),
+      lunch = 1.0,
+      dinner = 1.0,
+      guestMeals = 0.0,
+      targetMemberName = managerMember.name,
+      actorName = managerMember.name,
+    ).getOrThrow()
+    repo.addTransaction(
+      group = group,
+      cycleId = currentCycleId,
+      type = TransactionType.BAZAAR,
+      title = "Rice",
+      notes = "",
+      amount = 50.0,
+      paidByMemberId = managerMember.id,
+      dateEpochDay = LocalDate.now().toEpochDay(),
+      actorName = managerMember.name,
+      targetMemberName = managerMember.name,
+    ).getOrThrow()
+    repo.resetGroupData(groupId).getOrThrow()
+    val savedGroup = groupRef.get().await().toObject(MessGroup::class.java)!!
+    assertEquals(group.name, savedGroup.name)
+    assertEquals(group.memberUids, savedGroup.memberUids)
+    assertEquals("৳", savedGroup.currencySymbol)
+    assertEquals(CycleMode.MONTHLY.name, savedGroup.cycleMode)
+    assertEquals(6, savedGroup.weekStartDay)
+    assertEquals(-1L, savedGroup.customWeekStartEpochDay)
+    assertTrue(savedGroup.activeCycleId != currentCycleId)
+    assertEquals(0, groupRef.collection("mealEntries").whereArrayContains("memberUids", uid).get().await().size())
+    assertEquals(0, groupRef.collection("transactions").whereArrayContains("memberUids", uid).get().await().size())
+    assertEquals(0, groupRef.collection("activityLogs").whereArrayContains("memberUids", uid).get().await().size())
+    val cycles = groupRef.collection("cycles").whereArrayContains("memberUids", uid).get().await()
+    assertEquals(1, cycles.size())
+    assertEquals("ACTIVE", cycles.documents.single().getString("status"))
+    val members = groupRef.collection("members").whereArrayContains("memberUids", uid).get().await()
+    assertEquals(2, members.size())
+    assertEquals("cGhvdG8=", members.documents.first { it.getString("linkedUid") == uid }.getString("avatarBase64"))
+  }
 
   @Test
   fun createMessGroup_authenticatedUser_createsGroupCycleAndMember() = runBlocking {

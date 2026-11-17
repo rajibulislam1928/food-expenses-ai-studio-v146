@@ -366,6 +366,15 @@ object MessCalculator {
       .sortedBy { it.createdAtMillis() }
   }
 
+  fun isActivityLogUnread(
+    log: MessActivityLog,
+    currentUid: String,
+    lastSeenMillis: Long,
+    includeSelfChanges: Boolean,
+  ): Boolean =
+    log.createdAtMillis() > lastSeenMillis &&
+      (includeSelfChanges || log.actorUid != currentUid)
+
   fun filterActivityLogs(
     logs: List<MessActivityLog>,
     categoryFilter: ActivityCategory?,

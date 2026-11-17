@@ -109,6 +109,17 @@ fun MessActivitySheet(
     remember(logs, selectedCategory) {
       MessCalculator.filterActivityLogs(logs, selectedCategory)
     }
+  val unreadCount =
+    remember(logs, prefs.lastSeenActivityMillis, prefs.includeSelfChanges, currentUserId) {
+      logs.count { log ->
+        MessCalculator.isActivityLogUnread(
+          log = log,
+          currentUid = currentUserId,
+          lastSeenMillis = prefs.lastSeenActivityMillis,
+          includeSelfChanges = prefs.includeSelfChanges,
+        )
+      }
+    }
 
   ModalBottomSheet(
     onDismissRequest = onDismiss,
@@ -132,12 +143,17 @@ fun MessActivitySheet(
             style = MaterialTheme.typography.headlineSmall,
           )
           Text(
-            text = "See who added or changed meals & expenses",
+            text =
+              when {
+                unreadCount > 0 -> "$unreadCount unread updates"
+                logs.isNotEmpty() -> "All ${logs.size} updates read · history stays here"
+                else -> "See who added or changed meals & expenses"
+              },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
         }
-        if (logs.isNotEmpty()) {
+        if (unreadCount > 0) {
           TextButton(
             onClick = onMarkAllRead,
             modifier = Modifier.minimumInteractiveComponentSize().testTag("activity_mark_all_read"),
@@ -149,6 +165,20 @@ fun MessActivitySheet(
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(stringResource(R.string.mark_all_read))
+          }
+        } else if (logs.isNotEmpty()) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.testTag("activity_all_read_state"),
+          ) {
+            Icon(
+              imageVector = Icons.Filled.DoneAll,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary,
+              modifier = Modifier.size(16.dp),
+            )
+            Text("All read", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
           }
         }
         IconButton(
@@ -334,6 +364,13 @@ fun MessActivitySheet(
               log = log,
               members = members,
               currentUserId = currentUserId,
+              isUnread =
+                MessCalculator.isActivityLogUnread(
+                  log = log,
+                  currentUid = currentUserId,
+                  lastSeenMillis = prefs.lastSeenActivityMillis,
+                  includeSelfChanges = prefs.includeSelfChanges,
+                ),
             )
           }
         }
@@ -347,6 +384,7 @@ private fun ActivityLogRowCard(
   log: MessActivityLog,
   members: List<MessMember>,
   currentUserId: String,
+  isUnread: Boolean,
 ) {
   val isMeal = log.category == ActivityCategory.MEAL.name
   val icon = if (isMeal) Icons.Filled.Restaurant else Icons.Filled.ReceiptLong
@@ -413,6 +451,16 @@ private fun ActivityLogRowCard(
           tint = accentColor,
           modifier = Modifier.size(18.dp),
         )
+        if (isUnread) {
+          Box(
+            modifier =
+              Modifier.align(Alignment.TopEnd)
+                .padding(2.dp)
+                .size(8.dp)
+                .background(MaterialTheme.colorScheme.primary, CircleShape)
+                .testTag("unread_activity_indicator_${log.id}"),
+          )
+        }
       }
 
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {

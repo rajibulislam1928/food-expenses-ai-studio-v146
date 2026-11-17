@@ -1,7 +1,6 @@
 <resources>
     <string name="app_name">Food Expenses</string>
     <string name="tagline_subtitle">Shared meals, bazaar costs, live rates &amp; effortless settlements</string>
-    <string name="sign_in_with_google">Sign in with Google</string>
     <string name="nav_overview">Overview</string>
     <string name="nav_meals">Meals</string>
     <string name="nav_expenses">Expenses</string>

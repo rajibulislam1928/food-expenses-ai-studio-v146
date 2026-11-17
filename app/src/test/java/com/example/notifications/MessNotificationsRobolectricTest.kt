@@ -150,6 +150,21 @@ class MessNotificationsRobolectricTest {
   }
 
   @Test
+  fun activityLogUnreadStateTracksExplicitReadCutoffAndSelfPreference() {
+    val log =
+      MessActivityLog(
+        id = "unread_log",
+        actorUid = "uid_other",
+        createdAt = Timestamp(Date(2_000L)),
+      )
+
+    assertTrue(MessCalculator.isActivityLogUnread(log, "uid_me", 1_999L, false))
+    assertFalse(MessCalculator.isActivityLogUnread(log, "uid_me", 2_000L, false))
+    assertFalse(MessCalculator.isActivityLogUnread(log.copy(actorUid = "uid_me"), "uid_me", 1_999L, false))
+    assertTrue(MessCalculator.isActivityLogUnread(log.copy(actorUid = "uid_me"), "uid_me", 1_999L, true))
+  }
+
+  @Test
   fun notificationPreferences_deduplicatesSeenIdsAndSavesToggles() = runBlocking {
     val prefs = NotificationPreferences(app)
     prefs.setBackgroundEnabled(true)
@@ -158,13 +173,35 @@ class MessNotificationsRobolectricTest {
     prefs.setIncludeSelfChanges(true)
     prefs.markActivityIdsNotified(listOf("id_1", "id_2"))
     prefs.markActivityIdsNotified(listOf("id_2", "id_3"))
+    prefs.markAllActivityRead(2_000L)
+    prefs.markAllActivityRead(1_000L)
 
     val snap = prefs.getSnapshot()
     assertTrue(snap.backgroundEnabled)
     assertFalse(snap.notifyOnMeals)
     assertTrue(snap.notifyOnExpenses)
     assertTrue(snap.includeSelfChanges)
+    assertEquals(2_000L, snap.lastSeenActivityMillis)
     assertTrue(setOf("id_1", "id_2", "id_3").all { it in snap.notifiedActivityIds })
+  }
+
+  @Test
+  fun clearActivityNotifications_removesSummaryAndIndividualAlerts() {
+    shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+    val manager = app.getSystemService(NotificationManager::class.java)
+    shadowOf(manager).setNotificationsEnabled(true)
+    val logs = listOf(
+      MessActivityLog(id = "clear_1", actorUid = "other", actorName = "A", title = "Meal"),
+      MessActivityLog(id = "clear_2", actorUid = "other", actorName = "B", title = "Expense"),
+    )
+
+    assertEquals(2, MessNotificationHelper.postActivityNotifications(app, "Mess", logs))
+    assertTrue(manager.activeNotifications.any { it.id == 41000 })
+    assertTrue(manager.activeNotifications.any { it.id in 41100..46099 })
+
+    MessNotificationHelper.clearActivityNotifications(app)
+
+    assertTrue(manager.activeNotifications.none { it.id == 41000 || it.id in 41100..46099 })
   }
 
   @Test

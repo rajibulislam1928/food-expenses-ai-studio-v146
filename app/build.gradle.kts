@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.messexpense.kmrxqp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 46
-    versionName = "1.4.6"
+    versionCode = 52
+    versionName = "1.4.12"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -113,9 +113,6 @@ dependencies {
   implementation(libs.firebase.firestore)
 
   implementation(libs.firebase.auth)
-  implementation(libs.androidx.credentials)
-  implementation(libs.androidx.credentials.play.services)
-  implementation(libs.googleid)
   // implementation(libs.firebase.appcheck.recaptcha)
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)

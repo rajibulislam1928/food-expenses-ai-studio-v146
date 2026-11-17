@@ -283,9 +283,12 @@ class MessViewModel(
       val ready = state as? MessUiState.Ready ?: return@combine 0
       val seenAfter = prefs.lastSeenActivityMillis
       ready.data.activityLogs.count { log ->
-        val isUnread = log.createdAtMillis() > seenAfter
-        val actorMatches = prefs.includeSelfChanges || log.actorUid != currentUserId
-        isUnread && actorMatches
+        MessCalculator.isActivityLogUnread(
+          log = log,
+          currentUid = currentUserId,
+          lastSeenMillis = seenAfter,
+          includeSelfChanges = prefs.includeSelfChanges,
+        )
       }
     }
       .stateIn(
@@ -346,12 +349,10 @@ class MessViewModel(
 
   fun openActivitySheet() {
     _showActivitySheet.value = true
-    markAllActivityRead()
   }
 
   fun dismissActivitySheet() {
     _showActivitySheet.value = false
-    markAllActivityRead()
   }
 
   fun markAllActivityRead() {
@@ -507,6 +508,33 @@ class MessViewModel(
         .addMember(data.activeGroup, name)
         .onSuccess { _snackbarMessage.value = "Added $name to mess" }
         .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Failed to add member." }
+      _isBusy.value = false
+    }
+  }
+
+  fun updateMyProfilePhoto(uri: Uri?) {
+    val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    val member = data.members.firstOrNull { it.linkedUid == currentUserId }
+    if (member == null) {
+      _snackbarMessage.value = "Your account isn't linked to a member row in this group yet."
+      return
+    }
+    viewModelScope.launch {
+      _isBusy.value = true
+      val encoded = if (uri == null) null else runCatching {
+        withContext(Dispatchers.IO) {
+          ProfilePhotoCodec.encode(applicationContext ?: throw IllegalStateException("Photo picker unavailable."), uri)
+        }
+      }.getOrElse { error ->
+        _snackbarMessage.value = error.localizedMessage ?: "Couldn't prepare that photo."
+        _isBusy.value = false
+        return@launch
+      }
+      repository.updateMyMemberPhoto(data.activeGroup.id, member, encoded)
+        .onSuccess { _snackbarMessage.value = if (encoded == null) "Profile photo removed." else "Profile photo updated for this group." }
+        .onFailure { error ->
+          _snackbarMessage.value = error.localizedMessage ?: "Could not save your profile photo."
+        }
       _isBusy.value = false
     }
   }
@@ -769,6 +797,40 @@ class MessViewModel(
     }
   }
 
+  private fun isCurrentUserManager(data: MessDashboardData): Boolean =
+    data.activeGroup.ownerUid == data.currentUserId &&
+      data.members.any { it.linkedUid == data.currentUserId && it.role == MemberRole.MANAGER.name }
+
+  fun unlockCycle(cycleId: String) {
+    val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can unlock cycles."
+      return
+    }
+    viewModelScope.launch {
+      _isBusy.value = true
+      repository.unlockCycle(data.activeGroup.id, cycleId)
+        .onSuccess { _snackbarMessage.value = "Cycle unlocked. The manager can edit it now." }
+        .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Could not unlock this cycle." }
+      _isBusy.value = false
+    }
+  }
+
+  fun resetGroupData() {
+    val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can reset group data."
+      return
+    }
+    viewModelScope.launch {
+      _isBusy.value = true
+      repository.resetGroupData(data.activeGroup.id)
+        .onSuccess { _snackbarMessage.value = "Group data reset. Members and profile photos were kept." }
+        .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Could not reset group data." }
+      _isBusy.value = false
+    }
+  }
+
   fun switchCycle(cycleId: String) {
     val data = (uiState.value as? MessUiState.Ready)?.data ?: return
     viewModelScope.launch {
@@ -820,12 +882,14 @@ class MessViewModel(
     name: String,
     currencySymbol: String,
     cycleMode: CycleMode,
+    weekStartDay: Int,
+    customWeekStartEpochDay: Long,
   ) {
     val data = (uiState.value as? MessUiState.Ready)?.data ?: return
     viewModelScope.launch {
       _isBusy.value = true
       repository
-        .updateGroupSettings(data.activeGroup, name, currencySymbol, cycleMode)
+        .updateGroupSettings(data.activeGroup, name, currencySymbol, cycleMode, weekStartDay, customWeekStartEpochDay)
         .onSuccess { _snackbarMessage.value = "Mess settings updated" }
         .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Update failed." }
       _isBusy.value = false

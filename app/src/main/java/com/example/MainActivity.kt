@@ -9,10 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
-import androidx.credentials.CredentialManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -120,8 +117,6 @@ private fun MainFeatureScreen(
   onConsumeDeepLink: () -> Unit,
 ) {
   val context = LocalContext.current
-  val scope = rememberCoroutineScope()
-  val credentialManager = remember(context) { CredentialManager.create(context) }
 
   val viewModel: MessViewModel =
     viewModel(
@@ -173,10 +168,7 @@ private fun MainFeatureScreen(
     userEmail = user.email ?: "",
     onSignOut = {
       MessBackgroundSyncWorker.cancelPeriodic(context.applicationContext)
-      signOutUser(
-        credentialManager = credentialManager,
-        scope = scope,
-      )
+      signOutUser()
     },
   )
 }

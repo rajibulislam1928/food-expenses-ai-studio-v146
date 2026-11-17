@@ -25,6 +25,8 @@ object MessNotificationHelper {
   const val EXTRA_OPEN_ACTIVITY_SHEET = "extra_open_activity_sheet"
   private const val GROUP_KEY = "com.example.FOOD_EXPENSES_UPDATES"
   private const val SUMMARY_NOTIFICATION_ID = 41000
+  private const val ACTIVITY_NOTIFICATION_ID_FIRST = 41100
+  private const val ACTIVITY_NOTIFICATION_ID_LAST = 46099
 
   fun ensureChannel(context: Context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -53,6 +55,14 @@ object MessNotificationHelper {
         true
       }
     return osGranted && NotificationManagerCompat.from(context).areNotificationsEnabled()
+  }
+
+  fun clearActivityNotifications(context: Context) {
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    manager.cancel(SUMMARY_NOTIFICATION_ID)
+    manager.activeNotifications
+      .filter { it.id in ACTIVITY_NOTIFICATION_ID_FIRST..ACTIVITY_NOTIFICATION_ID_LAST }
+      .forEach { manager.cancel(it.tag, it.id) }
   }
 
   fun buildNotificationContent(
