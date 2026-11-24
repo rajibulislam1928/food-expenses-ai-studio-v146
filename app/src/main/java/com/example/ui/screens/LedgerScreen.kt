@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileDownload
@@ -97,6 +98,9 @@ fun LedgerScreen(
   onSettleMember: (MemberStanding) -> Unit,
   onAddMember: (String) -> Unit,
   onToggleMemberActive: (MessMember, Boolean) -> Unit,
+  onToggleMemberEditPermission: (MessMember, Boolean) -> Unit,
+  onRemoveMember: (MessMember) -> Unit,
+  onPermanentlyDeleteMember: (MessMember) -> Unit,
   onSwitchCycle: (String) -> Unit,
   onStartNewCycle: (CycleMode, closeCurrent: Boolean, rollover: Boolean) -> Unit,
   onExportXlsx: () -> Unit,
@@ -112,6 +116,8 @@ fun LedgerScreen(
   val negativeColor = if (isDark) NegativeCrimsonDark else NegativeCrimson
 
   var showAddMemberDialog by remember { mutableStateOf(false) }
+  var pendingRemoveMember by remember { mutableStateOf<MessMember?>(null) }
+  var pendingDeleteMember by remember { mutableStateOf<MessMember?>(null) }
   var showNewCycleDialog by remember { mutableStateOf(false) }
   var showResetConfirmation by remember { mutableStateOf(false) }
   var pendingSettle by remember { mutableStateOf<MemberStanding?>(null) }
@@ -329,13 +335,15 @@ fun LedgerScreen(
               if (memberSearchQuery.isBlank()) "Mess Members (${data.members.size})"
               else "Mess Members (${filteredDirectoryMembers.size} of ${data.members.size})"
             Text(directoryLabel, style = MaterialTheme.typography.titleMedium)
-            OutlinedButton(
-              onClick = { showAddMemberDialog = true },
-              modifier = Modifier.height(48.dp).testTag("add_member_button"),
-            ) {
-              Icon(Icons.Filled.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
-              Spacer(modifier = Modifier.width(6.dp))
-              Text("Add")
+            if (isManager) {
+              OutlinedButton(
+                onClick = { showAddMemberDialog = true },
+                modifier = Modifier.height(48.dp).testTag("add_member_button"),
+              ) {
+                Icon(Icons.Filled.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Add")
+              }
             }
           }
 
@@ -369,6 +377,12 @@ fun LedgerScreen(
                         append(if (member.role == "MANAGER") "Manager" else "Member")
                         append(" · ")
                         append(if (member.linkedUid.isNotBlank()) "Account linked" else "Managed offline")
+                        append(" · ")
+                        append(when {
+                          member.isRemoved -> "Removed"
+                          member.isActive -> "Active"
+                          else -> "Paused"
+                        })
                         if (memberContrib != null && memberContrib.totalContributed > 0.0) {
                           append(" · Contributed ")
                           append(MessCalculator.formatAmount(memberContrib.totalContributed, currency))
@@ -378,17 +392,42 @@ fun LedgerScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                   )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                  Text(
-                    text = if (member.isActive) "Active" else "Paused",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(end = 8.dp),
-                  )
-                  Switch(
-                    checked = member.isActive,
-                    onCheckedChange = { onToggleMemberActive(member, it) },
-                  )
+                if (isManager) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!member.isRemoved) {
+                      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Active", style = MaterialTheme.typography.labelSmall)
+                        Switch(
+                          checked = member.isActive,
+                          onCheckedChange = { onToggleMemberActive(member, it) },
+                          modifier = Modifier.testTag("member_active_${member.id}"),
+                        )
+                      }
+                      Spacer(Modifier.width(4.dp))
+                      val managerRow = member.role == "MANAGER" || member.linkedUid == data.activeGroup.ownerUid
+                      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Meals/expenses", style = MaterialTheme.typography.labelSmall)
+                        Switch(
+                          checked = managerRow || member.canEditMealsAndExpenses,
+                          onCheckedChange = { if (!managerRow) onToggleMemberEditPermission(member, it) },
+                          enabled = !managerRow,
+                          modifier = Modifier.testTag("member_edit_permission_${member.id}"),
+                        )
+                      }
+                    }
+                    if (member.role != "MANAGER" && member.linkedUid != data.currentUserId) {
+                      IconButton(
+                        onClick = { pendingRemoveMember = member },
+                        modifier = Modifier.testTag("remove_member_${member.id}"),
+                      ) {
+                        Icon(
+                          imageVector = Icons.Filled.DeleteOutline,
+                          contentDescription = "Manage ${member.name}",
+                          tint = MaterialTheme.colorScheme.error,
+                        )
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -499,6 +538,75 @@ fun LedgerScreen(
       onAdd = { name ->
         onAddMember(name)
         showAddMemberDialog = false
+      },
+    )
+  }
+
+  pendingRemoveMember?.let { member ->
+    AlertDialog(
+      onDismissRequest = { pendingRemoveMember = null },
+      title = { Text("Manage ${member.name}") },
+      text = {
+        Text(
+          if (member.isRemoved) {
+            "${member.name} has already lost access. Their history is still saved. You can permanently delete their linked history and member profile."
+          } else {
+            "Choose whether to remove access but keep the history, or permanently delete this member and their linked history."
+          }
+        )
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            pendingDeleteMember = member
+            pendingRemoveMember = null
+          },
+          modifier = Modifier.testTag("choose_delete_member_button"),
+          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+        ) {
+          Text("Delete member & history")
+        }
+      },
+      dismissButton = {
+        Row {
+          if (!member.isRemoved) {
+            TextButton(
+              onClick = {
+                onRemoveMember(member)
+                pendingRemoveMember = null
+              },
+              modifier = Modifier.testTag("confirm_remove_member_button"),
+            ) { Text("Remove access") }
+          }
+          TextButton(onClick = { pendingRemoveMember = null }) { Text("Cancel") }
+        }
+      },
+    )
+  }
+
+  pendingDeleteMember?.let { member ->
+    AlertDialog(
+      onDismissRequest = { pendingDeleteMember = null },
+      title = { Text("Permanently delete ${member.name}?") },
+      text = {
+        Text(
+          "This permanently deletes ${member.name}'s member profile, meal entries, expenses they paid, and activity history uniquely linked to them. Other members' records and the mess stay. This can't be undone."
+        )
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            onPermanentlyDeleteMember(member)
+            pendingDeleteMember = null
+          },
+          modifier = Modifier.testTag("confirm_permanently_delete_member_button"),
+          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+        ) {
+          Text("Delete permanently")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { pendingDeleteMember = null }) { Text("Cancel") }
       },
     )
   }

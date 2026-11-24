@@ -65,6 +65,8 @@ data class MessGroup(
   val name: String = "",
   val ownerUid: String = "",
   val memberUids: List<String> = emptyList(),
+  val editorUids: List<String> = emptyList(),
+  val editPermissionsInitialized: Boolean = false,
   val inviteCode: String = "",
   val currencySymbol: String = "৳",
   val cycleMode: String = CycleMode.MONTHLY.name,
@@ -100,6 +102,8 @@ data class MessMember(
   val avatarBase64: String = "",
   val role: String = MemberRole.MEMBER.name,
   val isActive: Boolean = true,
+  val canEditMealsAndExpenses: Boolean = true,
+  val isRemoved: Boolean = false,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 )

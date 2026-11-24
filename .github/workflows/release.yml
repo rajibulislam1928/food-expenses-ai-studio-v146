@@ -9,7 +9,7 @@ on:
       tag_name:
         description: 'Release tag name (e.g. v1.4.6)'
         required: true
-        default: 'v1.4.6'
+        default: 'v1.4.15'
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -43,17 +43,25 @@ jobs:
 
       - name: Determine Release Tag
         id: tag_info
+        env:
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG_NAME" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify release tag matches configured app versionName
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag_info.outputs.tag }}
         run: |
-          TAG="${{ steps.tag_info.outputs.tag }}"
+          TAG="$RELEASE_TAG"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Release tag must use the vMAJOR.MINOR.PATCH format."
+            exit 1
+          fi
           TAG_VERSION="${TAG#v}"
           APP_VERSION="$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
           if [ -z "$APP_VERSION" ] || [ "$TAG_VERSION" != "$APP_VERSION" ]; then
@@ -74,16 +82,17 @@ jobs:
       - name: Verify release signing secrets are configured
         shell: bash
         env:
-          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASE_KEYSTORE_GPG_BASE64: ${{ secrets.RELEASE_KEYSTORE_GPG_BASE64 }}
+          RELEASE_ENV_GPG_BASE64: ${{ secrets.RELEASE_ENV_GPG_BASE64 }}
+          RELEASE_BACKUP_PASSPHRASE: ${{ secrets.RELEASE_BACKUP_PASSPHRASE }}
         run: |
           set -euo pipefail
-          if [ -z "$UPLOAD_KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ]; then
-            echo "Error: Missing release signing secrets (UPLOAD_KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD)."
-            echo "Refusing to publish a debug APK as a stable release."
-            exit 1
-          fi
+          for name in RELEASE_KEYSTORE_GPG_BASE64 RELEASE_ENV_GPG_BASE64 RELEASE_BACKUP_PASSPHRASE; do
+            if [ -z "${!name:-}" ]; then
+              echo "Error: Missing release signing secret: $name"
+              exit 1
+            fi
+          done
 
       - name: Run offline unit and Robolectric tests
         shell: bash
@@ -94,29 +103,90 @@ jobs:
             --tests "com.example.ExampleRobolectricTest" \
             --tests "com.example.data.preferences.*" \
             --tests "com.example.domain.*" \
-            --tests "com.example.notifications.*"
+            --tests "com.example.notifications.*" \
+            --tests "com.example.data.repository.MessRepositoryCycleBoundsTest" \
+            --tests "com.example.ui.*"
 
-      - name: Decode Release Keystore and Build Signed Release APK & AAB
+      - name: Decrypt and build signed release artifacts
         shell: bash
         env:
-          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASE_KEYSTORE_GPG_BASE64: ${{ secrets.RELEASE_KEYSTORE_GPG_BASE64 }}
+          RELEASE_ENV_GPG_BASE64: ${{ secrets.RELEASE_ENV_GPG_BASE64 }}
+          RELEASE_BACKUP_PASSPHRASE: ${{ secrets.RELEASE_BACKUP_PASSPHRASE }}
         run: |
           set -euo pipefail
-          echo "$UPLOAD_KEYSTORE_BASE64" | tr -d ' \r\n\t' | base64 --decode > my-upload-key.jks
-          if [ ! -s my-upload-key.jks ]; then
-            echo "Error: Decoded release keystore is empty."
-            exit 1
-          fi
-          export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
-          gradle :app:assembleRelease :app:bundleRelease
+          umask 077
+          SIGNING_DIR="$RUNNER_TEMP/food-expenses-release-signing"
+          mkdir -p "$SIGNING_DIR"
+          trap 'rm -rf "$SIGNING_DIR"' EXIT
+          printf '%s' "$RELEASE_KEYSTORE_GPG_BASE64" | tr -d ' \r\n\t' | base64 --decode > "$SIGNING_DIR/keystore.jks.gpg"
+          printf '%s' "$RELEASE_ENV_GPG_BASE64" | tr -d ' \r\n\t' | base64 --decode > "$SIGNING_DIR/signing.env.gpg"
+          test -s "$SIGNING_DIR/keystore.jks.gpg"
+          test -s "$SIGNING_DIR/signing.env.gpg"
+          printf '%s' "$RELEASE_BACKUP_PASSPHRASE" | gpg --batch --yes --no-tty --pinentry-mode loopback --passphrase-fd 0 --output "$SIGNING_DIR/my-upload-key.jks" --decrypt "$SIGNING_DIR/keystore.jks.gpg"
+          printf '%s' "$RELEASE_BACKUP_PASSPHRASE" | gpg --batch --yes --no-tty --pinentry-mode loopback --passphrase-fd 0 --output "$SIGNING_DIR/signing.env" --decrypt "$SIGNING_DIR/signing.env.gpg"
+          test -s "$SIGNING_DIR/my-upload-key.jks"
+          test -s "$SIGNING_DIR/signing.env"
+          python3 - "$SIGNING_DIR/signing.env" "$SIGNING_DIR/my-upload-key.jks" <<'PYTHON'
+          import os
+          import shlex
+          import subprocess
+          import sys
+
+          source, keystore = sys.argv[1:]
+          allowed = {"STORE_PASSWORD", "KEY_PASSWORD"}
+          values = {}
+          with open(source, encoding="utf-8") as stream:
+              for number, raw in enumerate(stream, 1):
+                  line = raw.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  if line.startswith("export "):
+                      line = line[7:].lstrip()
+                  try:
+                      tokens = shlex.split(line, comments=True, posix=True)
+                  except ValueError:
+                      raise SystemExit(f"Unsupported signing environment syntax on line {number}.")
+                  if len(tokens) != 1 or "=" not in tokens[0]:
+                      raise SystemExit(f"Unsupported signing environment syntax on line {number}.")
+                  key, value = tokens[0].split("=", 1)
+                  if key in allowed:
+                      if key in values or not value or "\n" in value or "\r" in value:
+                          raise SystemExit(f"Invalid or duplicate {key} entry in signing environment.")
+                      values[key] = value
+          missing = allowed - values.keys()
+          if missing:
+              raise SystemExit("Signing environment is missing required password entries.")
+
+          build_env = os.environ.copy()
+          for name in ("RELEASE_BACKUP_PASSPHRASE", "RELEASE_KEYSTORE_GPG_BASE64", "RELEASE_ENV_GPG_BASE64"):
+              build_env.pop(name, None)
+          build_env.update(values)
+          build_env["KEYSTORE_PATH"] = keystore
+          for value in values.values():
+              print(f"::add-mask::{value}", flush=True)
+
+          subprocess.run(
+              ["keytool", "-list", "-keystore", keystore, "-alias", "upload", "-storepass:env", "STORE_PASSWORD"],
+              env=build_env,
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+              check=True,
+          )
+          subprocess.run(
+              ["gradle", "--no-daemon", ":app:assembleRelease", ":app:bundleRelease"],
+              env=build_env,
+              check=True,
+          )
+          PYTHON
 
       - name: Verify Signed Release APK & AAB and Compute SHA-256 Checksums
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag_info.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.tag_info.outputs.tag }}"
+          TAG="$RELEASE_TAG"
           APK_PATH="app/build/outputs/apk/release/app-release.apk"
           AAB_PATH="app/build/outputs/bundle/release/app-release.aab"
 
@@ -187,11 +257,21 @@ jobs:
           sha256sum "food-expenses-${TAG}-release.apk" "food-expenses-${TAG}-release.aab" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Cleanup Temporary Keystore
+      - name: Clean up temporary signing material
         if: always()
-        run: rm -f my-upload-key.jks
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/food-expenses-release-signing"
+
+      - name: Upload verified release candidate for manual checks
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: food-expenses-${{ steps.tag_info.outputs.tag }}-release-candidate
+          path: release-artifacts/*
+          retention-days: 7
 
       - name: Publish Stable GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag_info.outputs.tag }}

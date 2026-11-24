@@ -155,6 +155,29 @@ test("Invite codes forbid listing, allow exact get, and allow invited user to jo
     bobDb.collection("messGroups").where("memberUids", "array-contains", BOB_UID).get()
   );
 
+  // After joining, Bob can create his own linked member row, but cannot create another person's row.
+  const joinedMembers = bobDb.collection("messGroups").doc("group_1").collection("members");
+  await assertSucceeds(joinedMembers.doc("bob_member").set({
+    groupId: "group_1",
+    memberUids: [ALICE_UID, BOB_UID],
+    name: "Bob",
+    linkedUid: BOB_UID,
+    role: "MEMBER",
+    isActive: true,
+    createdAt: pastTimestamp(),
+    updatedAt: pastTimestamp(),
+  }));
+  await assertFails(joinedMembers.doc("charlie_member").set({
+    groupId: "group_1",
+    memberUids: [ALICE_UID, BOB_UID],
+    name: "Charlie",
+    linkedUid: CHARLIE_UID,
+    role: "MEMBER",
+    isActive: true,
+    createdAt: pastTimestamp(),
+    updatedAt: pastTimestamp(),
+  }));
+
   // Unfiltered query on messGroups fails (rules are not filters)
   await assertFails(bobDb.collection("messGroups").get());
 
@@ -552,3 +575,327 @@ test("ActivityLogs enforce actorUid authenticity, immutable content, and member 
   );
 });
 
+
+test("Only the group owner can add a member row", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupId = "manager_add_group";
+  const memberPath = (db, id) => db.collection("messGroups").doc(groupId).collection("members").doc(id);
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection("messGroups").doc(groupId).set({
+      name: "Manager Add Test",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      inviteCode: "ADD123",
+      currencySymbol: "৳",
+      cycleMode: "MONTHLY",
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+  });
+
+  const row = {
+    groupId,
+    memberUids: [ALICE_UID, BOB_UID],
+    name: "New roommate",
+    linkedUid: "",
+    role: "MEMBER",
+    isActive: true,
+    createdAt: pastTimestamp(),
+    updatedAt: pastTimestamp(),
+  };
+  await assertFails(memberPath(bobDb, "bob_added").set(row));
+  await assertSucceeds(memberPath(aliceDb, "alice_added").set(row));
+});
+
+test("Manager removal revokes access while retaining historical member and meal records", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupId = "remove_member_group";
+  const groupRef = aliceDb.collection("messGroups").doc(groupId);
+  const bobGroupRef = bobDb.collection("messGroups").doc(groupId);
+  const bobMemberRef = bobGroupRef.collection("members").doc("bob_member");
+  const memberRef = groupRef.collection("members").doc("bob_member");
+  const mealRef = groupRef.collection("mealEntries").doc("cycle_1_20768_bob_member");
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection("messGroups").doc(groupId).set({
+      name: "Remove Test",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      inviteCode: "RMV123",
+      currencySymbol: "৳",
+      cycleMode: "MONTHLY",
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+    await db.collection("messGroups").doc(groupId).collection("members").doc("bob_member").set({
+      groupId,
+      memberUids: [ALICE_UID, BOB_UID],
+      name: "Bob",
+      linkedUid: BOB_UID,
+      role: "MEMBER",
+      isActive: true,
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+    await db.collection("messGroups").doc(groupId).collection("mealEntries").doc("cycle_1_20768_bob_member").set({
+      groupId,
+      cycleId: "cycle_1",
+      memberUids: [ALICE_UID, BOB_UID],
+      memberId: "bob_member",
+      dateEpochDay: 20768,
+      lunch: 1,
+      dinner: 1,
+      guestMeals: 0,
+      updatedByUid: ALICE_UID,
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+  });
+
+  const unauthorizedRemoval = bobDb.batch();
+  unauthorizedRemoval.update(bobGroupRef, { memberUids: [ALICE_UID], updatedAt: pastTimestamp() });
+  unauthorizedRemoval.update(bobMemberRef, {
+    memberUids: [ALICE_UID],
+    linkedUid: "",
+    isActive: false,
+    isRemoved: true,
+    updatedAt: pastTimestamp(),
+  });
+  await assertFails(unauthorizedRemoval.commit());
+
+  const batch = aliceDb.batch();
+  batch.update(groupRef, { memberUids: [ALICE_UID], updatedAt: pastTimestamp() });
+  batch.update(memberRef, {
+    memberUids: [ALICE_UID],
+    linkedUid: "",
+    isActive: false,
+    isRemoved: true,
+    updatedAt: pastTimestamp(),
+  });
+  await assertSucceeds(batch.commit());
+
+  await assertFails(bobDb.collection("messGroups").doc(groupId).get());
+  await assertFails(bobDb.collection("messGroups").doc(groupId).collection("members").doc("bob_member").get());
+  const bobMealRef = bobDb.collection("messGroups").doc(groupId).collection("mealEntries").doc("cycle_1_20768_bob_member");
+  await assertFails(bobMealRef.get());
+  await assertFails(
+    bobDb.collection("messGroups").doc(groupId).collection("mealEntries")
+      .where("memberUids", "array-contains", BOB_UID).get()
+  );
+
+  const retained = await assertSucceeds(memberRef.get());
+  if (!retained.data().isRemoved || retained.data().isActive) throw new Error("Removed member was not retained as inactive history");
+  const historicalMeal = await assertSucceeds(mealRef.get());
+  if (historicalMeal.data().lunch !== 1) throw new Error("Historical meal entry was deleted or changed");
+});
+
+
+test("Only manager or record author may delete member-associated meal and transaction records", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupRef = aliceDb.collection("messGroups").doc("delete_history_group");
+  const mealRef = groupRef.collection("mealEntries").doc("meal_by_alice");
+  const txRef = groupRef.collection("transactions").doc("tx_by_alice");
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection("messGroups").doc("delete_history_group").set({
+      name: "Delete History Test",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      inviteCode: "DEL123",
+      currencySymbol: "৳",
+      cycleMode: "MONTHLY",
+      activeCycleId: "cycle_1",
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+    await db.collection("messGroups").doc("delete_history_group").collection("mealEntries").doc("meal_by_alice").set({
+      groupId: "delete_history_group", cycleId: "cycle_1", memberUids: [ALICE_UID, BOB_UID],
+      memberId: "member_1", dateEpochDay: 20768, lunch: 1, dinner: 0, guestMeals: 0,
+      updatedByUid: ALICE_UID, createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+    });
+    await db.collection("messGroups").doc("delete_history_group").collection("transactions").doc("tx_by_alice").set({
+      groupId: "delete_history_group", cycleId: "cycle_1", memberUids: [ALICE_UID, BOB_UID],
+      type: "BAZAAR", title: "Rice", amount: 10, paidByMemberId: "member_1", dateEpochDay: 20768,
+      createdByUid: ALICE_UID, createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+    });
+  });
+
+  await assertFails(bobDb.collection("messGroups").doc("delete_history_group")
+    .collection("mealEntries").doc("meal_by_alice").delete());
+  await assertFails(bobDb.collection("messGroups").doc("delete_history_group")
+    .collection("transactions").doc("tx_by_alice").delete());
+  await assertSucceeds(mealRef.delete());
+  await assertSucceeds(txRef.delete());
+});
+
+
+test("Only the group manager may add or delete member profiles", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupRef = aliceDb.collection("messGroups").doc("member_admin_group");
+  const aliceMemberRef = groupRef.collection("members").doc("alice_member");
+  const bobMemberRef = bobDb.collection("messGroups").doc("member_admin_group").collection("members").doc("bob_member");
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    const base = db.collection("messGroups").doc("member_admin_group");
+    await base.set({
+      name: "Member Admin Test", ownerUid: ALICE_UID, memberUids: [ALICE_UID, BOB_UID],
+      inviteCode: "ADM123", currencySymbol: "৳", cycleMode: "MONTHLY",
+      activeCycleId: "cycle_1", createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+    });
+    const members = base.collection("members");
+    await members.doc("alice_member").set({
+      groupId: "member_admin_group", memberUids: [ALICE_UID, BOB_UID], name: "Alice",
+      linkedUid: ALICE_UID, role: "MANAGER", isActive: true,
+      createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+    });
+    await members.doc("bob_member").set({
+      groupId: "member_admin_group", memberUids: [ALICE_UID, BOB_UID], name: "Bob",
+      linkedUid: BOB_UID, role: "MEMBER", isActive: true,
+      createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+    });
+  });
+
+  await assertFails(bobDb.collection("messGroups").doc("member_admin_group").collection("members").doc("new_member").set({
+    groupId: "member_admin_group", memberUids: [ALICE_UID, BOB_UID], name: "Eve",
+    linkedUid: "", role: "MEMBER", isActive: true, createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+  }));
+  await assertFails(bobMemberRef.delete());
+  await assertSucceeds(aliceDb.collection("messGroups").doc("member_admin_group").collection("members").doc("new_member").set({
+    groupId: "member_admin_group", memberUids: [ALICE_UID, BOB_UID], name: "Eve",
+    linkedUid: "", role: "MEMBER", isActive: true, createdAt: pastTimestamp(), updatedAt: pastTimestamp(),
+  }));
+  await assertSucceeds(bobMemberRef.get());
+  await assertSucceeds(aliceMemberRef.get());
+  await assertSucceeds(aliceDb.collection("messGroups").doc("member_admin_group").collection("members").doc("bob_member").delete());
+});
+
+test("only enabled editors can write meals and expenses; manager can grant edit access", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupId = "edit_permission_group";
+  const groupRef = aliceDb.collection("messGroups").doc(groupId);
+  const bobGroupRef = bobDb.collection("messGroups").doc(groupId);
+  const createdAt = pastTimestamp();
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    const group = db.collection("messGroups").doc(groupId);
+    await group.set({
+      name: "Permission Test",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      editorUids: [ALICE_UID],
+      editPermissionsInitialized: true,
+      inviteCode: "ED1T99",
+      currencySymbol: "₹",
+      cycleMode: "MONTHLY",
+      activeCycleId: "cycle_1",
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const members = group.collection("members");
+    await members.doc("alice_member").set({
+      groupId, memberUids: [ALICE_UID, BOB_UID], name: "Alice", linkedUid: ALICE_UID,
+      role: "MANAGER", isActive: true, canEditMealsAndExpenses: true,
+      createdAt, updatedAt: createdAt,
+    });
+    await members.doc("bob_member").set({
+      groupId, memberUids: [ALICE_UID, BOB_UID], name: "Bob", linkedUid: BOB_UID,
+      role: "MEMBER", isActive: true, canEditMealsAndExpenses: false,
+      createdAt, updatedAt: createdAt,
+    });
+  });
+
+  const meal = {
+    groupId,
+    cycleId: "cycle_1",
+    memberUids: [ALICE_UID, BOB_UID],
+    memberId: "bob_member",
+    dateEpochDay: 20768,
+    lunch: 1,
+    dinner: 1,
+    guestMeals: 0,
+    updatedByUid: BOB_UID,
+    createdAt,
+    updatedAt: pastTimestamp(),
+  };
+  await assertFails(bobGroupRef.collection("mealEntries").doc("meal_bob").set(meal));
+
+  const transaction = {
+    groupId,
+    cycleId: "cycle_1",
+    memberUids: [ALICE_UID, BOB_UID],
+    type: "BAZAAR",
+    title: "Rice",
+    amount: 100,
+    paidByMemberId: "bob_member",
+    dateEpochDay: 20768,
+    createdByUid: BOB_UID,
+    createdAt,
+    updatedAt: pastTimestamp(),
+  };
+  await assertFails(bobGroupRef.collection("transactions").doc("tx_bob").set(transaction));
+
+  const bobMemberAsBob = bobGroupRef.collection("members").doc("bob_member");
+  const aliceMemberAsBob = bobGroupRef.collection("members").doc("alice_member");
+  // Members cannot grant themselves or others edit access, whether by the member row,
+  // the group editor list, or the exact two-document batch used by the app.
+  await assertFails(bobMemberAsBob.update({ canEditMealsAndExpenses: true, updatedAt: pastTimestamp() }));
+  await assertFails(aliceMemberAsBob.update({ canEditMealsAndExpenses: false, updatedAt: pastTimestamp() }));
+  const unauthorizedBatch = bobDb.batch();
+  unauthorizedBatch.update(bobMemberAsBob, { canEditMealsAndExpenses: true, updatedAt: pastTimestamp() });
+  unauthorizedBatch.update(bobGroupRef, {
+    editorUids: [ALICE_UID, BOB_UID], editPermissionsInitialized: true, updatedAt: pastTimestamp(),
+  });
+  await assertFails(unauthorizedBatch.commit());
+
+  // The manager grants permission with the same atomic member+group update used by the app.
+  const managerBatch = aliceDb.batch();
+  managerBatch.update(groupRef.collection("members").doc("bob_member"), {
+    canEditMealsAndExpenses: true, updatedAt: pastTimestamp(),
+  });
+  managerBatch.update(groupRef, {
+    editorUids: [ALICE_UID, BOB_UID], editPermissionsInitialized: true, updatedAt: pastTimestamp(),
+  });
+  await assertSucceeds(managerBatch.commit());
+  await assertSucceeds(bobGroupRef.collection("mealEntries").doc("meal_bob").set(meal));
+  await assertSucceeds(bobGroupRef.collection("transactions").doc("tx_bob").set(transaction));
+
+  // The manager is permanently an editor: direct member-row revocation and removal
+  // from the group editor list are both rejected.
+  const aliceMemberAsAlice = groupRef.collection("members").doc("alice_member");
+  await assertFails(aliceMemberAsAlice.update({ canEditMealsAndExpenses: false, updatedAt: pastTimestamp() }));
+  await assertFails(groupRef.update({ editorUids: [BOB_UID], updatedAt: pastTimestamp() }));
+  const disableManagerBatch = aliceDb.batch();
+  disableManagerBatch.update(aliceMemberAsAlice, { canEditMealsAndExpenses: false, updatedAt: pastTimestamp() });
+  disableManagerBatch.update(groupRef, {
+    editorUids: [BOB_UID], editPermissionsInitialized: true, updatedAt: pastTimestamp(),
+  });
+  await assertFails(disableManagerBatch.commit());
+
+  // Even aside from the stored editor list, the manager can still make meal/expense edits.
+  const managerMeal = { ...meal, memberId: "alice_member", updatedByUid: ALICE_UID };
+  const managerTransaction = { ...transaction, paidByMemberId: "alice_member", createdByUid: ALICE_UID };
+  await assertSucceeds(groupRef.collection("mealEntries").doc("meal_alice").set(managerMeal));
+  await assertSucceeds(groupRef.collection("transactions").doc("tx_alice").set(managerTransaction));
+
+  // The manager can revoke another member using the app's atomic two-document update.
+  const revokeBatch = aliceDb.batch();
+  revokeBatch.update(groupRef.collection("members").doc("bob_member"), {
+    canEditMealsAndExpenses: false, updatedAt: pastTimestamp(),
+  });
+  revokeBatch.update(groupRef, {
+    editorUids: [ALICE_UID], editPermissionsInitialized: true, updatedAt: pastTimestamp(),
+  });
+  await assertSucceeds(revokeBatch.commit());
+  await assertFails(bobGroupRef.collection("mealEntries").doc("meal_bob_after_revoke").set(meal));
+  await assertFails(bobGroupRef.collection("transactions").doc("tx_bob_after_revoke").set(transaction));
+});

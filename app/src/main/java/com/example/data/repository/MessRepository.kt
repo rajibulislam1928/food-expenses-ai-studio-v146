@@ -28,7 +28,9 @@ import com.google.firebase.firestore.DocumentSnapshot.ServerTimestampBehavior
 import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
@@ -63,6 +65,52 @@ class MessRepository(
   )
 
   private val mealWriteMutex = Mutex()
+
+  /**
+   * Reads a meal row from the local cache first so edits to a previously synced row can proceed
+   * offline. If the row is absent from cache, only a server read can prove that it is safe to
+   * create; an offline cache miss must not be mistaken for a new row and overwrite remote data.
+   */
+  internal suspend fun readMealDocumentForEdit(docRef: DocumentReference): DocumentSnapshot {
+    val cached =
+      try {
+        docRef.get(Source.CACHE).await()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (_: Exception) {
+        // A cache miss is normal for a row that has not been read on this device yet.
+        // Fall through to the server; never treat it as proof the row does not exist.
+        null
+      }
+    if (cached?.exists() == true) return cached
+
+    return try {
+      docRef.get(Source.SERVER).await()
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      var cause: Throwable? = e
+      var isOffline = false
+      while (cause != null) {
+        if (
+          (cause is FirebaseFirestoreException &&
+            cause.code == FirebaseFirestoreException.Code.UNAVAILABLE) ||
+            cause.message?.contains("offline", ignoreCase = true) == true
+        ) {
+          isOffline = true
+          break
+        }
+        cause = cause.cause
+      }
+      if (isOffline) {
+        throw IllegalStateException(
+          "This meal isn't in the offline cache. Reconnect to confirm its current value before editing; no changes were saved.",
+          e,
+        )
+      }
+      throw e
+    }
+  }
 
   private fun requireUserId(): String =
     auth.currentUser?.uid
@@ -346,6 +394,8 @@ class MessRepository(
         "name" to cleanGroupName,
         "ownerUid" to uid,
         "memberUids" to listOf(uid),
+        "editorUids" to listOf(uid),
+        "editPermissionsInitialized" to true,
         "inviteCode" to inviteCode,
         "currencySymbol" to currencySymbol.ifBlank { "৳" }.take(6),
         "cycleMode" to cycleMode.name,
@@ -388,6 +438,7 @@ class MessRepository(
         "linkedUid" to uid,
         "role" to MemberRole.MANAGER.name,
         "isActive" to true,
+        "canEditMealsAndExpenses" to true,
         "createdAt" to FieldValue.serverTimestamp(),
         "updatedAt" to FieldValue.serverTimestamp(),
       ),
@@ -408,6 +459,7 @@ class MessRepository(
             "linkedUid" to "",
             "role" to MemberRole.MEMBER.name,
             "isActive" to true,
+            "canEditMealsAndExpenses" to true,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
           ),
@@ -476,14 +528,18 @@ class MessRepository(
     val groupRef = db.collection("messGroups").document(invite.groupId)
 
     try {
-      groupRef
-        .update(
-          mapOf(
-            "memberUids" to FieldValue.arrayUnion(uid),
-            "updatedAt" to FieldValue.serverTimestamp(),
-          )
+      val beforeJoin = groupRef.get().await().toObject(MessGroup::class.java)
+        ?: throw IllegalStateException("Unable to load invited mess group.")
+      val effectiveEditors = if (beforeJoin.editPermissionsInitialized) beforeJoin.editorUids
+        else beforeJoin.memberUids
+      groupRef.update(
+        mapOf(
+          "memberUids" to FieldValue.arrayUnion(uid),
+          "editorUids" to (effectiveEditors + uid).distinct(),
+          "editPermissionsInitialized" to true,
+          "updatedAt" to FieldValue.serverTimestamp(),
         )
-        .await()
+      ).await()
 
       val updatedGroup =
         groupRef.get().await().toObject(MessGroup::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -510,6 +566,7 @@ class MessRepository(
             "linkedUid" to uid,
             "role" to MemberRole.MEMBER.name,
             "isActive" to true,
+            "canEditMealsAndExpenses" to true,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
           ),
@@ -584,7 +641,12 @@ class MessRepository(
       chunk.forEach { ref ->
         batch.update(
           ref,
-          mapOf("memberUids" to targetUids, "updatedAt" to FieldValue.serverTimestamp()),
+          mapOf(
+          "memberUids" to targetUids,
+          "editorUids" to (if (group.editPermissionsInitialized) group.editorUids else group.memberUids).filter { it in targetUids },
+          "editPermissionsInitialized" to true,
+          "updatedAt" to FieldValue.serverTimestamp(),
+        ),
         )
       }
       runCatching { batch.commit().await() }.onFailure { err ->
@@ -610,18 +672,24 @@ class MessRepository(
     name: String,
     role: MemberRole = MemberRole.MEMBER,
   ): Result<String> = runCatching {
-    requireUserId()
+    val uid = requireUserId()
+    val groupRef = db.collection("messGroups").document(group.id)
+    val liveGroup = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)
+      ?: error("This mess no longer exists.")
+    require(uid == liveGroup.ownerUid && uid == group.ownerUid) { "Only the group manager can add members." }
+    require(role == MemberRole.MEMBER) { "Only regular members can be added here." }
     val cleanName = name.trim().take(60)
     require(cleanName.isNotEmpty()) { "Member name cannot be empty." }
     val memberRef = db.collection("messGroups").document(group.id).collection("members").document()
     val payload =
       mapOf(
         "groupId" to group.id,
-        "memberUids" to group.memberUids,
+        "memberUids" to liveGroup.memberUids,
         "name" to cleanName,
         "linkedUid" to "",
         "role" to role.name,
         "isActive" to true,
+        "canEditMealsAndExpenses" to true,
         "createdAt" to FieldValue.serverTimestamp(),
         "updatedAt" to FieldValue.serverTimestamp(),
       )
@@ -658,12 +726,45 @@ class MessRepository(
     }
   }
 
+  suspend fun updateMemberEditPermission(
+    group: MessGroup,
+    member: MessMember,
+    canEdit: Boolean,
+  ): Result<Unit> = runCatching {
+    val uid = requireUserId()
+    require(!member.isRemoved) { "Removed members cannot be granted edit access." }
+    val groupRef = db.collection("messGroups").document(group.id)
+    val liveGroup = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)
+      ?: error("This mess no longer exists.")
+    require(uid == liveGroup.ownerUid && uid == group.ownerUid) { "Only the group manager can change edit permissions." }
+    val isManagerRow = member.role == MemberRole.MANAGER.name || member.linkedUid == liveGroup.ownerUid
+    require(!isManagerRow || canEdit) { "The manager's Meals/Expenses access must stay on." }
+    val editors = (if (liveGroup.editPermissionsInitialized) liveGroup.editorUids else liveGroup.memberUids)
+      .toMutableSet()
+    // Keep the manager in the editor set regardless of changes to other members.
+    editors.add(liveGroup.ownerUid)
+    if (member.linkedUid.isNotBlank() && !isManagerRow) {
+      if (canEdit) editors.add(member.linkedUid) else editors.remove(member.linkedUid)
+    }
+    val batch = db.batch()
+    val memberRef = groupRef.collection("members").document(member.id)
+    batch.update(memberRef, mapOf("canEditMealsAndExpenses" to canEdit, "updatedAt" to FieldValue.serverTimestamp()))
+    batch.update(groupRef, mapOf(
+      "editorUids" to editors.toList(),
+      "editPermissionsInitialized" to true,
+      "updatedAt" to FieldValue.serverTimestamp(),
+    ))
+    batch.commit().await()
+  }
+
   suspend fun updateMemberActive(
     groupId: String,
     member: MessMember,
     isActive: Boolean,
   ): Result<Unit> = runCatching {
-    requireUserId()
+    val uid = requireUserId()
+    require(uid.isNotBlank())
+    require(!member.isRemoved) { "A removed member cannot be reactivated." }
     val memberRef =
       db.collection("messGroups").document(groupId).collection("members").document(member.id)
     try {
@@ -674,6 +775,111 @@ class MessRepository(
       throw e
     } catch (e: Exception) {
       handleFirestoreError(e, OperationType.UPDATE, memberRef.path)
+      throw e
+    }
+  }
+
+  /** Permanently deletes one member and only records directly attributable to that member. */
+  suspend fun permanentlyDeleteMember(group: MessGroup, member: MessMember): Result<Int> = runCatching {
+    val uid = requireUserId()
+    val groupRef = db.collection("messGroups").document(group.id)
+    val liveGroup = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)
+      ?: error("This mess no longer exists.")
+    require(uid == liveGroup.ownerUid) { "Only the group manager can permanently delete a member." }
+    val membersCollection = groupRef.collection("members")
+    val memberRef = membersCollection.document(member.id)
+    val liveMember = memberRef.get(Source.SERVER).await().toObject(MessMember::class.java)
+      ?: error("This member was already deleted.")
+    require(liveMember.role != MemberRole.MANAGER.name) { "The group manager cannot be deleted." }
+    require(liveMember.linkedUid != uid) { "You cannot delete your own account." }
+    require(liveMember.name == member.name) { "The member changed. Refresh and try again." }
+
+    val matchingNameCount = membersCollection.get(Source.SERVER).await().documents.count {
+      it.id != liveMember.id && it.getString("name") == liveMember.name
+    }
+    val records = linkedMapOf<String, DocumentReference>()
+    suspend fun collect(collection: String, field: String, value: String) {
+      if (value.isBlank()) return
+      groupRef.collection(collection).whereEqualTo(field, value).get(Source.SERVER).await()
+        .documents.forEach { records[it.reference.path] = it.reference }
+    }
+    collect("mealEntries", "memberId", liveMember.id)
+    collect("transactions", "paidByMemberId", liveMember.id)
+    if (liveMember.linkedUid.isNotBlank()) collect("activityLogs", "actorUid", liveMember.linkedUid)
+    // Legacy logs identify the target by name only. Preserve them when that name is ambiguous.
+    if (matchingNameCount == 0) collect("activityLogs", "targetMemberName", liveMember.name)
+
+    // Delete in bounded chunks. If interrupted, the member remains available for a safe retry;
+    // membership is revoked only after all attributable history is gone.
+    records.values.toList().chunked(400).forEach { chunk ->
+      val batch = db.batch()
+      chunk.forEach(batch::delete)
+      batch.commit().await()
+    }
+
+    val latestGroup = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)
+      ?: error("This mess no longer exists.")
+    require(uid == latestGroup.ownerUid) { "Only the group manager can permanently delete a member." }
+    val latestMember = memberRef.get(Source.SERVER).await()
+    require(latestMember.exists()) { "This member was already deleted." }
+    val remainingUids = latestGroup.memberUids.toMutableList()
+    if (liveMember.linkedUid.isNotBlank()) remainingUids.remove(liveMember.linkedUid)
+    require(uid in remainingUids) { "The group manager must remain a member." }
+    val finalBatch = db.batch()
+    if (remainingUids != latestGroup.memberUids) {
+      finalBatch.update(groupRef, mapOf(
+        "memberUids" to remainingUids,
+        "editorUids" to (if (latestGroup.editPermissionsInitialized) latestGroup.editorUids else latestGroup.memberUids).filter { it in remainingUids },
+        "editPermissionsInitialized" to true,
+        "updatedAt" to FieldValue.serverTimestamp(),
+      ))
+    }
+    finalBatch.delete(memberRef)
+    finalBatch.commit().await()
+    records.size
+  }
+
+  /** Removes a member from current use while retaining their row and historical attribution. */
+  suspend fun removeMember(group: MessGroup, member: MessMember): Result<Unit> = runCatching {
+    val uid = requireUserId()
+    require(uid == group.ownerUid) { "Only the group owner can remove a member." }
+    require(member.role != MemberRole.MANAGER.name) { "The group manager cannot be removed." }
+    require(member.linkedUid != uid) { "You cannot remove your own account." }
+    require(!member.isRemoved) { "This member has already been removed." }
+
+    val groupRef = db.collection("messGroups").document(group.id)
+    val memberRef = groupRef.collection("members").document(member.id)
+    val batch = db.batch()
+    val targetUids = group.memberUids.toMutableList()
+    if (member.linkedUid.isNotBlank() && member.linkedUid in targetUids) {
+      targetUids.remove(member.linkedUid)
+      require(uid in targetUids) { "The group owner must remain a member." }
+      batch.update(
+        groupRef,
+        mapOf(
+          "memberUids" to targetUids,
+          "editorUids" to (if (group.editPermissionsInitialized) group.editorUids else group.memberUids).filter { it in targetUids },
+          "editPermissionsInitialized" to true,
+          "updatedAt" to FieldValue.serverTimestamp(),
+        ),
+      )
+    }
+    batch.update(
+      memberRef,
+      mapOf(
+        "isActive" to false,
+        "isRemoved" to true,
+        "linkedUid" to "",
+        "memberUids" to targetUids,
+        "updatedAt" to FieldValue.serverTimestamp(),
+      ),
+    )
+    try {
+      batch.commit().await()
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, "${groupRef.path}/members/${member.id}")
       throw e
     }
   }
@@ -735,7 +941,7 @@ class MessRepository(
 
     try {
       mealWriteMutex.withLock {
-        val existing = docRef.get().await()
+        val existing = readMealDocumentForEdit(docRef)
         val batch = db.batch()
         val cleanTarget = targetMemberName.trim().take(80)
         val mealTitle = if (cleanTarget.isNotBlank()) "Meals for $cleanTarget" else "Meal Entry"
@@ -840,7 +1046,7 @@ class MessRepository(
             .map { entry ->
               val entryId = "${cycleId}_${targetDateEpochDay}_${entry.memberId}"
               async {
-                val snap = colRef.document(entryId).get().await()
+                val snap = readMealDocumentForEdit(colRef.document(entryId))
                 entryId to snap
               }
             }

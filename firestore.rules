@@ -28,7 +28,32 @@ service cloud.firestore {
     // The group owner is the trusted manager for manager-only recovery/reset actions.
     function isGroupManager(groupId) {
       return isSignedIn() &&
-             get(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid == request.auth.uid;
+             getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid == request.auth.uid;
+    }
+
+    function canEditMealsAndExpenses(groupId) {
+      let group = getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data;
+      return isSignedIn() && (request.auth.uid == group.ownerUid ||
+             !('editPermissionsInitialized' in group) || !group.editPermissionsInitialized ||
+             request.auth.uid in group.editorUids);
+    }
+
+    // Keep the manager enabled through every group permission/member transition.
+    function managerAlwaysEnabled(oldGroup, newGroup) {
+      let wasInitialized = ('editPermissionsInitialized' in oldGroup) && oldGroup.editPermissionsInitialized == true;
+      let isInitialized = ('editPermissionsInitialized' in newGroup) && newGroup.editPermissionsInitialized == true;
+      let managerIncluded = ('editorUids' in newGroup) && newGroup.editorUids is list &&
+                            newGroup.editorUids.hasAny([oldGroup.ownerUid]);
+      return (!('editorUids' in newGroup) || managerIncluded) &&
+             (!wasInitialized || (isInitialized && managerIncluded)) &&
+             (!isInitialized || managerIncluded);
+    }
+
+    function managerMemberAlwaysEnabled(groupId, oldMember, newMember) {
+      let ownerUid = getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid;
+      return !((oldMember.role == 'MANAGER') || (('linkedUid' in oldMember) && oldMember.linkedUid == ownerUid)) ||
+             (newMember.role == oldMember.role && newMember.linkedUid == oldMember.linkedUid &&
+              (!('canEditMealsAndExpenses' in newMember) || newMember.canEditMealsAndExpenses == true));
     }
 
     function isValidId(id) {
@@ -78,7 +103,7 @@ service cloud.firestore {
 
     function isValidMessGroup(data) {
       return data.keys().hasAll(['name', 'ownerUid', 'memberUids', 'inviteCode', 'currencySymbol', 'cycleMode', 'createdAt', 'updatedAt']) &&
-             data.keys().hasOnly(['name', 'ownerUid', 'memberUids', 'inviteCode', 'currencySymbol', 'cycleMode', 'breakfastWeight', 'weekStartDay', 'customWeekStartEpochDay', 'activeCycleId', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['name', 'ownerUid', 'memberUids', 'inviteCode', 'currencySymbol', 'cycleMode', 'breakfastWeight', 'weekStartDay', 'customWeekStartEpochDay', 'activeCycleId', 'editorUids', 'editPermissionsInitialized', 'createdAt', 'updatedAt']) &&
              data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
              isValidId(data.ownerUid) &&
              isValidMemberUidsList(data.memberUids) &&
@@ -89,6 +114,8 @@ service cloud.firestore {
              (!('customWeekStartEpochDay' in data) || (data.customWeekStartEpochDay is int && data.customWeekStartEpochDay >= -1)) &&
              (!('breakfastWeight' in data) || (data.breakfastWeight is number && data.breakfastWeight > 0 && data.breakfastWeight <= 2.0)) &&
              (!('activeCycleId' in data) || data.activeCycleId == null || (data.activeCycleId is string && data.activeCycleId.size() <= 128)) &&
+             (!('editorUids' in data) || (data.editorUids is list && data.editorUids.size() <= 50 && data.memberUids.hasAll(data.editorUids))) &&
+             (!('editPermissionsInitialized' in data) || data.editPermissionsInitialized is bool) &&
              isValidTimestamps(data);
     }
 
@@ -109,7 +136,7 @@ service cloud.firestore {
 
     function isValidMessMember(data, groupId) {
       return data.keys().hasAll(['groupId', 'memberUids', 'name', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
-             data.keys().hasOnly(['groupId', 'memberUids', 'name', 'linkedUid', 'avatarBase64', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['groupId', 'memberUids', 'name', 'linkedUid', 'avatarBase64', 'role', 'isActive', 'isRemoved', 'canEditMealsAndExpenses', 'createdAt', 'updatedAt']) &&
              data.groupId == groupId &&
              isValidMemberUidsList(data.memberUids) &&
              data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
@@ -117,6 +144,8 @@ service cloud.firestore {
              (!('avatarBase64' in data) || (data.avatarBase64 is string && data.avatarBase64.size() <= 90000)) &&
              data.role in ['MANAGER', 'MEMBER'] &&
              data.isActive is bool &&
+             (!('isRemoved' in data) || data.isRemoved is bool) &&
+             (!('canEditMealsAndExpenses' in data) || data.canEditMealsAndExpenses is bool) &&
              isValidTimestamps(data);
     }
 
@@ -224,6 +253,7 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(groupId) &&
+                       managerAlwaysEnabled(existing(), incoming()) &&
                        isValidMessGroup(incoming()) &&
                        incoming().ownerUid == existing().ownerUid &&
                        incoming().createdAt == existing().createdAt &&
@@ -231,7 +261,7 @@ service cloud.firestore {
                          // Action A: Owner updates group configuration or active cycle
                          (request.auth.uid == existing().ownerUid &&
                           (existing().ownerUid in incoming().memberUids) &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'currencySymbol', 'cycleMode', 'breakfastWeight', 'weekStartDay', 'customWeekStartEpochDay', 'activeCycleId', 'memberUids', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'currencySymbol', 'cycleMode', 'breakfastWeight', 'weekStartDay', 'customWeekStartEpochDay', 'activeCycleId', 'editorUids', 'editPermissionsInitialized', 'updatedAt'])) ||
                          // Action B: Member switches active cycle
                          ((request.auth.uid in existing().memberUids) &&
                           incoming().diff(existing()).affectedKeys().hasOnly(['activeCycleId', 'updatedAt'])) ||
@@ -240,7 +270,13 @@ service cloud.firestore {
                           (request.auth.uid in incoming().memberUids) &&
                           incoming().memberUids.hasAll(existing().memberUids) &&
                           incoming().memberUids.size() == existing().memberUids.size() + 1 &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'editorUids', 'editPermissionsInitialized', 'updatedAt']) &&
+                          (((!('editPermissionsInitialized' in existing()) || !existing().editPermissionsInitialized) &&
+                             (!('editPermissionsInitialized' in incoming()) || !incoming().editPermissionsInitialized ||
+                              (request.auth.uid in incoming().editorUids && incoming().editorUids.size() == existing().memberUids.size() + 1 && incoming().editorUids.hasAll(existing().memberUids)))) ||
+                           (('editPermissionsInitialized' in existing() && existing().editPermissionsInitialized) &&
+                            ('editPermissionsInitialized' in incoming() && incoming().editPermissionsInitialized &&
+                             request.auth.uid in incoming().editorUids && incoming().editorUids.size() == existing().editorUids.size() + 1 && incoming().editorUids.hasAll(existing().editorUids)))) &&
                           exists(/databases/$(database)/documents/messInvites/$(existing().inviteCode)) &&
                           get(/databases/$(database)/documents/messInvites/$(existing().inviteCode)).data.groupId == groupId) ||
                          // Action D: Non-owner member leaves group
@@ -249,7 +285,13 @@ service cloud.firestore {
                           !(request.auth.uid in incoming().memberUids) &&
                           existing().memberUids.hasAll(incoming().memberUids) &&
                           incoming().memberUids.size() == existing().memberUids.size() - 1 &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']))
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])) ||
+                         // Action E: Owner removes exactly one member; the owner remains.
+                         (request.auth.uid == existing().ownerUid &&
+                          (existing().ownerUid in incoming().memberUids) &&
+                          existing().memberUids.hasAll(incoming().memberUids) &&
+                          incoming().memberUids.size() == existing().memberUids.size() - 1 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'editorUids', 'editPermissionsInitialized', 'updatedAt']))
                        );
 
       allow delete: if isSignedIn() && isValidId(groupId) && existing().ownerUid == request.auth.uid;
@@ -257,10 +299,9 @@ service cloud.firestore {
       // Cycles Subcollection
       match /cycles/{cycleId} {
         allow get: if isSignedIn() && isValidId(groupId) && isValidId(cycleId) && (
-          (resource == null && isGroupMember(groupId)) ||
-          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+          isGroupMember(groupId)
         );
-        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+        allow list: if isSignedIn() && isGroupMember(groupId);
 
         allow create: if isSignedIn() &&
                          isValidId(groupId) &&
@@ -274,7 +315,7 @@ service cloud.firestore {
                          isValidId(groupId) &&
                          isValidId(cycleId) &&
                          isValidMessCycle(incoming(), groupId) &&
-                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         isGroupMember(groupId) &&
                          incoming().groupId == existing().groupId &&
                          incoming().createdByUid == existing().createdByUid &&
                          incoming().createdAt == existing().createdAt && (
@@ -300,27 +341,40 @@ service cloud.firestore {
       // Members Subcollection
       match /members/{memberId} {
         allow get: if isSignedIn() && isValidId(groupId) && isValidId(memberId) && (
-          (resource == null && isGroupMember(groupId)) ||
-          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+          isGroupMember(groupId)
         );
-        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+        allow list: if isSignedIn() && isGroupMember(groupId);
 
         allow create: if isSignedIn() &&
                          isValidId(groupId) &&
                          isValidId(memberId) &&
                          isValidMessMember(incoming(), groupId) &&
-                         (request.auth.uid in incoming().memberUids) &&
-                         (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
+                         incoming().memberUids == getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids &&
+                         (
+                           // The manager may create managed/offline rows, including in the atomic group-creation batch.
+                           getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid == request.auth.uid ||
+                           // A newly invited user may create only their own linked member row after joining.
+                           (incoming().linkedUid == request.auth.uid &&
+                            incoming().role == 'MEMBER' &&
+                            incoming().isActive == true &&
+                            (!('isRemoved' in incoming()) || incoming().isRemoved == false) &&
+                            request.auth.uid in incoming().memberUids &&
+                            request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids)
+                         );
 
         allow update: if isSignedIn() &&
                          isValidId(groupId) &&
                          isValidId(memberId) &&
+                         managerMemberAlwaysEnabled(groupId, existing(), incoming()) &&
                          isValidMessMember(incoming(), groupId) &&
-                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         isGroupMember(groupId) &&
                          incoming().groupId == existing().groupId &&
                          incoming().createdAt == existing().createdAt &&
                          (
-                           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'linkedUid', 'role', 'isActive', 'memberUids', 'updatedAt']) ||
+                           (isGroupManager(groupId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'linkedUid', 'role', 'isActive', 'isRemoved', 'canEditMealsAndExpenses', 'memberUids', 'updatedAt']) &&
+                            (!('isRemoved' in incoming()) || !incoming().isRemoved || (!incoming().isActive && incoming().linkedUid == '' &&
+                              incoming().memberUids == getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids))) ||
                            (request.auth.uid == existing().linkedUid &&
                             incoming().linkedUid == existing().linkedUid &&
                             incoming().diff(existing()).affectedKeys().hasOnly(['avatarBase64', 'updatedAt']))
@@ -329,23 +383,23 @@ service cloud.firestore {
         allow delete: if isSignedIn() &&
                          isValidId(groupId) &&
                          isValidId(memberId) &&
-                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         isGroupMember(groupId) &&
                          get(/databases/$(database)/documents/messGroups/$(groupId)).data.ownerUid == request.auth.uid;
       }
 
       // Meal Entries Subcollection
       match /mealEntries/{entryId} {
         allow get: if isSignedIn() && isValidId(groupId) && isValidId(entryId) && (
-          (resource == null && isGroupMember(groupId)) ||
-          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+          isGroupMember(groupId)
         );
-        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+        allow list: if isSignedIn() && isGroupMember(groupId);
 
         allow create: if isSignedIn() &&
                          isValidId(groupId) &&
                          isValidId(entryId) &&
                          isValidMealEntry(incoming(), groupId) &&
                          incoming().updatedByUid == request.auth.uid &&
+                         canEditMealsAndExpenses(groupId) &&
                          (request.auth.uid in incoming().memberUids) &&
                          (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
 
@@ -353,31 +407,33 @@ service cloud.firestore {
                          isValidId(groupId) &&
                          isValidId(entryId) &&
                          isValidMealEntry(incoming(), groupId) &&
-                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         isGroupMember(groupId) &&
                          incoming().groupId == existing().groupId &&
                          incoming().cycleId == existing().cycleId &&
                          incoming().memberId == existing().memberId &&
                          incoming().dateEpochDay == existing().dateEpochDay &&
                          incoming().createdAt == existing().createdAt &&
                          incoming().updatedByUid == request.auth.uid &&
+                         canEditMealsAndExpenses(groupId) &&
                          incoming().diff(existing()).affectedKeys().hasOnly(['breakfast', 'lunch', 'dinner', 'guestMeals', 'updatedByUid', 'memberUids', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(groupId) && isValidId(entryId) && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId));
+        allow delete: if isSignedIn() && isValidId(groupId) && isValidId(entryId) && isGroupMember(groupId) &&
+                         (canEditMealsAndExpenses(groupId) && (isGroupManager(groupId) || existing().updatedByUid == request.auth.uid));
       }
 
       // Transactions Subcollection (Bazaar, Fixed Utilities, Deposits, Settlements)
       match /transactions/{txId} {
         allow get: if isSignedIn() && isValidId(groupId) && isValidId(txId) && (
-          (resource == null && isGroupMember(groupId)) ||
-          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+          isGroupMember(groupId)
         );
-        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+        allow list: if isSignedIn() && isGroupMember(groupId);
 
         allow create: if isSignedIn() &&
                          isValidId(groupId) &&
                          isValidId(txId) &&
                          isValidMessTransaction(incoming(), groupId) &&
                          incoming().createdByUid == request.auth.uid &&
+                         canEditMealsAndExpenses(groupId) &&
                          (request.auth.uid in incoming().memberUids) &&
                          (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
 
@@ -385,29 +441,31 @@ service cloud.firestore {
                          isValidId(groupId) &&
                          isValidId(txId) &&
                          isValidMessTransaction(incoming(), groupId) &&
-                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         isGroupMember(groupId) &&
                          incoming().groupId == existing().groupId &&
                          incoming().cycleId == existing().cycleId &&
                          incoming().createdByUid == existing().createdByUid &&
                          incoming().createdAt == existing().createdAt &&
+                         canEditMealsAndExpenses(groupId) &&
                          incoming().diff(existing()).affectedKeys().hasOnly(['type', 'title', 'notes', 'amount', 'paidByMemberId', 'dateEpochDay', 'memberUids', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(groupId) && isValidId(txId) && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId));
+        allow delete: if isSignedIn() && isValidId(groupId) && isValidId(txId) && isGroupMember(groupId) &&
+                         (canEditMealsAndExpenses(groupId) && (isGroupManager(groupId) || existing().createdByUid == request.auth.uid));
       }
 
       // Activity Logs Subcollection (Immutable meal/expense attribution audit trail)
       match /activityLogs/{activityId} {
         allow get: if isSignedIn() && isValidId(groupId) && isValidId(activityId) && (
-          (resource == null && isGroupMember(groupId)) ||
-          (resource != null && ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)))
+          isGroupMember(groupId)
         );
-        allow list: if isSignedIn() && (request.auth.uid in existing().memberUids);
+        allow list: if isSignedIn() && isGroupMember(groupId);
 
         allow create: if isSignedIn() &&
                          isValidId(groupId) &&
                          isValidId(activityId) &&
                          isValidMessActivityLog(incoming(), groupId) &&
                          incoming().actorUid == request.auth.uid &&
+                         canEditMealsAndExpenses(groupId) &&
                          (request.auth.uid in incoming().memberUids) &&
                          (request.auth.uid in getAfter(/databases/$(database)/documents/messGroups/$(groupId)).data.memberUids);
 
@@ -415,7 +473,7 @@ service cloud.firestore {
                          isValidId(groupId) &&
                          isValidId(activityId) &&
                          isValidMessActivityLog(incoming(), groupId) &&
-                         ((request.auth.uid in existing().memberUids) || isGroupMember(groupId)) &&
+                         isGroupMember(groupId) &&
                          incoming().groupId == existing().groupId &&
                          incoming().cycleId == existing().cycleId &&
                          incoming().category == existing().category &&

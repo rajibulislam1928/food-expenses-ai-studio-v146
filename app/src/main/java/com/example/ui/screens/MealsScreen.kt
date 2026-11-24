@@ -249,7 +249,7 @@ fun MealsScreen(
           member = member,
           entry = entry,
           updatedByName = updatedByName,
-          isReadOnly = isClosed,
+          isReadOnly = isClosed || member.isRemoved,
           onUpdate = { l, d, g ->
             onUpdateMeal(member.id, selectedDateEpochDay, l, d, g)
           },
@@ -314,7 +314,13 @@ private fun MemberMealCard(
                 modifier = Modifier.testTag("meal_updated_by_${member.id}"),
               )
             }
-            if (!member.isActive) {
+            if (member.isRemoved) {
+              Text(
+                text = "Removed from group · past entries retained",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            } else if (!member.isActive) {
               Text(
                 text = "Inactive for fixed bills",
                 style = MaterialTheme.typography.labelSmall,

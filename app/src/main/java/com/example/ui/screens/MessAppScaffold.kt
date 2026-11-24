@@ -660,6 +660,9 @@ private fun MessDashboardContent(
                 onSettleMember = viewModel::settleMemberBalance,
                 onAddMember = viewModel::addMember,
                 onToggleMemberActive = viewModel::toggleMemberActive,
+                onToggleMemberEditPermission = viewModel::toggleMemberEditPermission,
+                onRemoveMember = viewModel::removeMember,
+                onPermanentlyDeleteMember = viewModel::permanentlyDeleteMember,
                 onSwitchCycle = viewModel::switchCycle,
                 onStartNewCycle = viewModel::startNewCycle,
                 onExportXlsx = { viewModel.openDownloadSheet(ReportFormat.XLSX) },
@@ -684,7 +687,7 @@ private fun MessDashboardContent(
   addTxSheetType?.let { initialType ->
     AddTransactionSheet(
       initialType = initialType,
-      members = data.members,
+      members = data.members.filterNot { it.isRemoved },
       activeCycle = data.activeCycle,
       currencySymbol = data.activeGroup.currencySymbol,
       onDismiss = { addTxSheetType = null },
@@ -704,7 +707,7 @@ private fun MessDashboardContent(
 
   if (showBulkBazaarDialog) {
     BulkBazaarDialog(
-      members = data.members,
+      members = data.members.filterNot { it.isRemoved },
       activeCycle = data.activeCycle,
       currencySymbol = data.activeGroup.currencySymbol,
       onDismiss = { showBulkBazaarDialog = false },

@@ -502,6 +502,10 @@ class MessViewModel(
 
   fun addMember(name: String) {
     val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can add members."
+      return
+    }
     viewModelScope.launch {
       _isBusy.value = true
       repository
@@ -541,12 +545,78 @@ class MessViewModel(
 
   fun toggleMemberActive(member: MessMember, isActive: Boolean) {
     val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can change member status."
+      return
+    }
+    if (member.isRemoved) return
     viewModelScope.launch {
       repository
         .updateMemberActive(data.activeGroup.id, member, isActive)
         .onFailure { err ->
           _snackbarMessage.value = err.localizedMessage ?: "Failed to update member status."
         }
+    }
+  }
+
+  fun toggleMemberEditPermission(member: MessMember, canEdit: Boolean) {
+    val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can change edit permissions."
+      return
+    }
+    if (member.isRemoved) return
+    if (member.role == MemberRole.MANAGER.name || member.linkedUid == data.activeGroup.ownerUid) {
+      if (!canEdit) _snackbarMessage.value = "The manager's Meals/Expenses access must stay on."
+      return
+    }
+    viewModelScope.launch {
+      repository.updateMemberEditPermission(data.activeGroup, member, canEdit)
+        .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Failed to update edit permission." }
+    }
+  }
+
+  private fun canCurrentUserEdit(data: MessDashboardData): Boolean {
+    val actor = data.currentUserId
+    return if (data.activeGroup.editPermissionsInitialized) actor in data.activeGroup.editorUids
+      else actor in data.activeGroup.memberUids
+  }
+
+  fun removeMember(member: MessMember) {
+    val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can remove members."
+      return
+    }
+    if (member.role == MemberRole.MANAGER.name || member.linkedUid == data.currentUserId) {
+      _snackbarMessage.value = "The group manager cannot be removed."
+      return
+    }
+    viewModelScope.launch {
+      _isBusy.value = true
+      repository.removeMember(data.activeGroup, member)
+        .onSuccess { _snackbarMessage.value = "${member.name} removed. Their history is kept." }
+        .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Could not remove member." }
+      _isBusy.value = false
+    }
+  }
+
+  fun permanentlyDeleteMember(member: MessMember) {
+    val data = (uiState.value as? MessUiState.Ready)?.data ?: return
+    if (!isCurrentUserManager(data)) {
+      _snackbarMessage.value = "Only the group manager can permanently delete a member."
+      return
+    }
+    if (member.role == MemberRole.MANAGER.name || member.linkedUid == data.currentUserId) {
+      _snackbarMessage.value = "The group manager cannot be deleted."
+      return
+    }
+    viewModelScope.launch {
+      _isBusy.value = true
+      repository.permanentlyDeleteMember(data.activeGroup, member)
+        .onSuccess { count -> _snackbarMessage.value = "${member.name} and $count linked history records deleted." }
+        .onFailure { err -> _snackbarMessage.value = err.localizedMessage ?: "Could not permanently delete member." }
+      _isBusy.value = false
     }
   }
 
@@ -561,6 +631,14 @@ class MessViewModel(
     val cycle = data.activeCycle ?: return
     if (cycle.status == CycleStatus.CLOSED.name) {
       _snackbarMessage.value = "This cycle is closed. Switch to or start an active cycle to edit."
+      return
+    }
+    if (data.members.firstOrNull { it.id == memberId }?.isRemoved == true) {
+      _snackbarMessage.value = "Removed members' past meal entries are kept read-only."
+      return
+    }
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
       return
     }
     val targetMemberName = data.members.firstOrNull { it.id == memberId }?.name.orEmpty()
@@ -590,6 +668,10 @@ class MessViewModel(
     val cycle = data.activeCycle ?: return
     if (cycle.status == CycleStatus.CLOSED.name) {
       _snackbarMessage.value = "Closed cycles cannot be edited."
+      return
+    }
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
       return
     }
     val yesterday = targetEpochDay - 1L
@@ -623,6 +705,10 @@ class MessViewModel(
     val cycle = data.activeCycle ?: return
     if (cycle.status == CycleStatus.CLOSED.name) {
       _snackbarMessage.value = "Closed cycles cannot be edited."
+      return
+    }
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
       return
     }
     val activeMembers = data.members.filter { it.isActive }
@@ -679,6 +765,10 @@ class MessViewModel(
       _snackbarMessage.value = "Closed cycles are locked. Start a new cycle to add entries."
       return
     }
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
+      return
+    }
     val actorName = currentActorName(data.members)
     val payerLabel = resolvePayerLabel(data.members, paidByMemberId)
     viewModelScope.launch {
@@ -716,6 +806,10 @@ class MessViewModel(
     }
     if (items.isEmpty()) return
     val total = items.sumOf { it.amount }
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
+      return
+    }
     val actorName = currentActorName(data.members)
     val payerLabel = resolvePayerLabel(data.members, paidByMemberId)
     viewModelScope.launch {
@@ -744,6 +838,10 @@ class MessViewModel(
     val data = (uiState.value as? MessUiState.Ready)?.data ?: return
     if (data.activeCycle?.status == CycleStatus.CLOSED.name) {
       _snackbarMessage.value = "Closed cycles cannot be modified."
+      return
+    }
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
       return
     }
     val actorName = currentActorName(data.members)
@@ -775,6 +873,10 @@ class MessViewModel(
       if (isRefund) MessTransaction.SETTLEMENT_REFUND_OUT else MessTransaction.SETTLEMENT_DUE_IN
     val title =
       if (isRefund) "Refund to ${standing.member.name}" else "Due Paid by ${standing.member.name}"
+    if (!canCurrentUserEdit(data)) {
+      _snackbarMessage.value = "You don't have permission to edit meals and expenses."
+      return
+    }
     val actorName = currentActorName(data.members)
     viewModelScope.launch {
       _isBusy.value = true

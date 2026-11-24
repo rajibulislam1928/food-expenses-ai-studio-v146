@@ -6,6 +6,7 @@ import com.example.data.model.MessGroup
 import com.example.data.model.MessMember
 import com.example.data.model.TransactionType
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.Source
 import java.time.LocalDate
 import java.util.UUID
 import kotlinx.coroutines.flow.first
@@ -13,6 +14,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -231,6 +233,60 @@ class MessRepositoryRuleTest : FirestoreEmulatorTestBase() {
   }
 
   @Test
+  fun mealEdit_offlineCacheMissFailsClearlyWithoutWriting() = runBlocking {
+    val suffix = UUID.randomUUID().toString().take(8)
+    val uid = signInTestUser("offline_meal_$suffix@test.com")
+    val repo = MessRepository(firestore, auth)
+    val groupId = "offline_group_$suffix"
+    val groupRef = firestore.collection("messGroups").document(groupId)
+    val inviteCode = "O${suffix.take(5).uppercase()}"
+    val now = com.google.firebase.Timestamp.now()
+    groupRef.set(
+      mapOf(
+        "name" to "Offline cache test",
+        "ownerUid" to uid,
+        "memberUids" to listOf(uid),
+        "inviteCode" to inviteCode,
+        "currencySymbol" to "৳",
+        "cycleMode" to CycleMode.MONTHLY.name,
+        "activeCycleId" to "cycle_$suffix",
+        "createdAt" to now,
+        "updatedAt" to now,
+      )
+    ).await()
+    val group = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)!!
+    val date = LocalDate.now().toEpochDay()
+    val memberId = "member_$suffix"
+    val entryId = "${group.activeCycleId}_${date}_$memberId"
+    val mealRef = firestore.collection("messGroups").document(group.id)
+      .collection("mealEntries").document(entryId)
+
+    firestore.disableNetwork().await()
+    try {
+      val result =
+        repo.upsertMealEntry(
+          group = group,
+          cycleId = group.activeCycleId,
+          memberId = memberId,
+          dateEpochDay = date,
+          lunch = 1.0,
+          dinner = 0.0,
+          guestMeals = 0.0,
+        )
+      assertTrue(result.isFailure)
+      val failure = result.exceptionOrNull()
+      assertTrue(
+        "Unexpected offline failure: ${failure?.javaClass?.simpleName}: ${failure?.message}",
+        failure?.message?.contains("isn't in the offline cache") == true,
+      )
+    } finally {
+      firestore.enableNetwork().await()
+    }
+
+    assertFalse(mealRef.get(Source.SERVER).await().exists())
+  }
+
+  @Test
   fun applyDayPresetToMembers_mixedCreateAndUpdate_succeedsWithoutPermissionDenied() = runBlocking {
     val suffix = UUID.randomUUID().toString().take(8)
     val aliceUid = signInTestUser("preset_alice_$suffix@test.com")
@@ -431,6 +487,49 @@ class MessRepositoryRuleTest : FirestoreEmulatorTestBase() {
     assertTrue(logs.any { it.category == "MEAL" && it.action == "UPDATED" && it.changeDetail.contains("Lunch 1 → 2") })
     assertTrue(logs.any { it.category == "EXPENSE" && it.action == "ADDED" && it.title == "Fish & Spices" })
     assertTrue(logs.any { it.category == "EXPENSE" && it.action == "REMOVED" && it.title == "Fish & Spices" })
+  }
+
+  @Test
+  fun permanentlyDeleteMember_removesOnlyTargetHistoryAndKeepsGroupAndOthers() = runBlocking {
+    val suffix = UUID.randomUUID().toString().take(8)
+    val uid = signInTestUser("purge_$suffix@test.com")
+    val repo = MessRepository(firestore, auth)
+    val groupId = repo.createMessGroup(
+      name = "Purge Test $suffix",
+      currencySymbol = "₹",
+      cycleMode = CycleMode.MONTHLY,
+      creatorMemberName = "Manager",
+      initialMemberNames = listOf("Rahim"),
+    ).getOrThrow()
+    val groupRef = firestore.collection("messGroups").document(groupId)
+    val group = groupRef.get(Source.SERVER).await().toObject(MessGroup::class.java)!!
+    val members = groupRef.collection("members").get(Source.SERVER).await().documents
+      .mapNotNull { it.toObject(MessMember::class.java) }
+    val manager = members.first { it.linkedUid == uid }
+    val target = members.first { it.name == "Rahim" }
+    val today = LocalDate.now().toEpochDay()
+
+    repo.upsertMealEntry(group, group.activeCycleId, target.id, today, 1.0, 0.0, 0.0,
+      targetMemberName = target.name, actorName = manager.name).getOrThrow()
+    repo.upsertMealEntry(group, group.activeCycleId, manager.id, today, 0.0, 1.0, 0.0,
+      targetMemberName = manager.name, actorName = manager.name).getOrThrow()
+    repo.addTransaction(group, group.activeCycleId, TransactionType.BAZAAR, "Rahim rice", "", 100.0,
+      target.id, today, actorName = manager.name, targetMemberName = target.name).getOrThrow()
+    repo.addTransaction(group, group.activeCycleId, TransactionType.BAZAAR, "Manager vegetables", "", 50.0,
+      manager.id, today, actorName = manager.name, targetMemberName = manager.name).getOrThrow()
+
+    val deletedRecords = repo.permanentlyDeleteMember(group, target).getOrThrow()
+
+    assertTrue("Expected target meals, transaction, and attributed activity history to be deleted", deletedRecords >= 4)
+    assertEquals(group.name, groupRef.get(Source.SERVER).await().getString("name"))
+    assertEquals(listOf(uid), groupRef.get(Source.SERVER).await().get("memberUids"))
+    assertFalse(groupRef.collection("members").document(target.id).get(Source.SERVER).await().exists())
+    assertEquals(0, groupRef.collection("mealEntries").whereEqualTo("memberId", target.id).get(Source.SERVER).await().size())
+    assertEquals(1, groupRef.collection("mealEntries").whereEqualTo("memberId", manager.id).get(Source.SERVER).await().size())
+    assertEquals(0, groupRef.collection("transactions").whereEqualTo("paidByMemberId", target.id).get(Source.SERVER).await().size())
+    assertEquals(1, groupRef.collection("transactions").whereEqualTo("paidByMemberId", manager.id).get(Source.SERVER).await().size())
+    assertEquals(0, groupRef.collection("activityLogs").whereEqualTo("targetMemberName", target.name).get(Source.SERVER).await().size())
+    assertTrue(groupRef.collection("activityLogs").whereEqualTo("targetMemberName", manager.name).get(Source.SERVER).await().size() > 0)
   }
 
   @Test
