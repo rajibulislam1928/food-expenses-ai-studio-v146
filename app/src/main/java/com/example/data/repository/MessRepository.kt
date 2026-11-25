@@ -528,15 +528,13 @@ class MessRepository(
     val groupRef = db.collection("messGroups").document(invite.groupId)
 
     try {
-      val beforeJoin = groupRef.get().await().toObject(MessGroup::class.java)
-        ?: throw IllegalStateException("Unable to load invited mess group.")
-      val effectiveEditors = if (beforeJoin.editPermissionsInitialized) beforeJoin.editorUids
-        else beforeJoin.memberUids
+      // Non-members cannot read group documents. Join and grant the invitee editor access
+      // atomically; arrayUnion preserves the owner and any existing editors. Leave the
+      // permission-initialization flag unchanged so legacy groups keep their semantics.
       groupRef.update(
         mapOf(
           "memberUids" to FieldValue.arrayUnion(uid),
-          "editorUids" to (effectiveEditors + uid).distinct(),
-          "editPermissionsInitialized" to true,
+          "editorUids" to FieldValue.arrayUnion(invite.ownerUid, uid),
           "updatedAt" to FieldValue.serverTimestamp(),
         )
       ).await()

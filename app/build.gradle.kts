@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.messexpense.kmrxqp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 55
-    versionName = "1.4.15"
+    versionCode = 56
+    versionName = "1.4.16"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

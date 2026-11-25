@@ -18,9 +18,9 @@ import org.robolectric.annotation.Config
 class ExpenseBannerTest {
 
   @Test
-  fun `app build config matches v1_4_15 and versionCode 55`() {
-    assertEquals(55, BuildConfig.VERSION_CODE)
-    assertEquals("1.4.15", BuildConfig.VERSION_NAME)
+  fun `app build config matches v1_4_16 and versionCode 56`() {
+    assertEquals(56, BuildConfig.VERSION_CODE)
+    assertEquals("1.4.16", BuildConfig.VERSION_NAME)
   }
 
   @Test

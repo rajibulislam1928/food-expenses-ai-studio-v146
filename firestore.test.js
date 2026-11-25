@@ -5,6 +5,8 @@ const {
 } = require("@firebase/rules-unit-testing");
 const { test, before, after, beforeEach } = require("node:test");
 const fs = require("node:fs");
+const firebase = require("firebase/compat/app");
+require("firebase/compat/firestore");
 
 let testEnv;
 const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
@@ -142,13 +144,18 @@ test("Invite codes forbid listing, allow exact get, and allow invited user to jo
     })
   );
 
-  // Bob joins himself cleanly
+  // The app must join without a forbidden pre-join read; preserve legacy permission semantics.
   await assertSucceeds(
     bobDb.collection("messGroups").doc("group_1").update({
-      memberUids: [ALICE_UID, BOB_UID],
-      updatedAt: pastTimestamp(),
+      memberUids: firebase.firestore.FieldValue.arrayUnion(BOB_UID),
+      editorUids: firebase.firestore.FieldValue.arrayUnion(ALICE_UID, BOB_UID),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
     })
   );
+  const joinedLegacy = await assertSucceeds(bobDb.collection("messGroups").doc("group_1").get());
+  if (Object.hasOwn(joinedLegacy.data(), "editPermissionsInitialized")) {
+    throw new Error("Joining must not initialize legacy permission semantics");
+  }
 
   // Bob can now read and query groups he belongs to
   await assertSucceeds(
@@ -183,6 +190,53 @@ test("Invite codes forbid listing, allow exact get, and allow invited user to jo
 
   // Charlie still cannot read group
   await assertFails(charlieDb.collection("messGroups").doc("group_1").get());
+});
+
+test("Initialized invite join atomically preserves existing editors and adds the invitee", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const groupRef = aliceDb.collection("messGroups").doc("initialized_join");
+  const inviteRef = aliceDb.collection("messInvites").doc("INIT01");
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("messGroups").doc("initialized_join").set({
+      name: "Initialized Join",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, CHARLIE_UID],
+      editorUids: [ALICE_UID, CHARLIE_UID],
+      editPermissionsInitialized: true,
+      inviteCode: "INIT01",
+      currencySymbol: "৳",
+      cycleMode: "MONTHLY",
+      createdAt: pastTimestamp(),
+      updatedAt: pastTimestamp(),
+    });
+    await adminDb.collection("messInvites").doc("INIT01").set({
+      inviteCode: "INIT01",
+      groupId: "initialized_join",
+      groupName: "Initialized Join",
+      ownerUid: ALICE_UID,
+      createdAt: pastTimestamp(),
+    });
+  });
+
+  const bobGroup = bobDb.collection("messGroups").doc("initialized_join");
+  await assertFails(bobGroup.get());
+  await assertSucceeds(bobGroup.update({
+    memberUids: firebase.firestore.FieldValue.arrayUnion(BOB_UID),
+    editorUids: firebase.firestore.FieldValue.arrayUnion(ALICE_UID, BOB_UID),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+  }));
+  const joined = await assertSucceeds(bobGroup.get());
+  const data = joined.data();
+  for (const uid of [ALICE_UID, CHARLIE_UID, BOB_UID]) {
+    if (!data.memberUids.includes(uid) || !data.editorUids.includes(uid)) {
+      throw new Error(`Expected member/editor ${uid} to be preserved after join`);
+    }
+  }
+  if (data.editPermissionsInitialized !== true) {
+    throw new Error("Initialized permission semantics must remain enabled");
+  }
 });
 
 test("Members can set only their own bounded profile photo, visible to their group", async () => {

@@ -146,8 +146,11 @@ class MessRepositoryRuleTest : FirestoreEmulatorTestBase() {
       withTimeout(FLOW_TIMEOUT_MS) { charlieRepo.observeUserGroups(charlieUid).first() }
     assertTrue(charlieGroups.none { it.id == groupId })
 
-    // Bob joins via invite code
+    // Bob cannot read the group before joining, but the invite flow must still succeed.
     val bobUid = signInTestUser("bob_$suffix@test.com")
+    val groupRef = firestore.collection("messGroups").document(groupId)
+    val preJoinRead = runCatching { groupRef.get(Source.SERVER).await() }
+    assertTrue("A non-member must not read group data before joining", preJoinRead.isFailure)
     val bobRepo = MessRepository(firestore, auth)
     val joinedId =
       withTimeout(DEFAULT_TIMEOUT_MS) {
@@ -160,6 +163,11 @@ class MessRepositoryRuleTest : FirestoreEmulatorTestBase() {
         bobRepo.observeUserGroups(bobUid).first { it.any { g -> g.id == groupId } }
       }
     assertTrue(bobGroups.any { it.id == groupId && bobUid in it.memberUids })
+    val joinedGroupSnapshot = groupRef.get(Source.SERVER).await()
+    val joinedGroup = joinedGroupSnapshot.toObject(MessGroup::class.java)!!
+    assertTrue(aliceUid in joinedGroup.editorUids)
+    assertTrue(bobUid in joinedGroup.editorUids)
+    assertTrue(joinedGroup.editPermissionsInitialized)
   }
 
   @Test
